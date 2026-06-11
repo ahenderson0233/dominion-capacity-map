@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+dominion_session.json
+dominion_dashboard_standalone.html
+dominion_*_export.xlsx
+dominion_footprint_analysis.xlsx
+dominion_captured_points.csv

@@ -1,0 +1,1404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+<title>Dominion (VA + NC) Hosting Capacity &amp; Site Selection</title>
+<link rel="stylesheet" href="https://js.arcgis.com/4.29/esri/themes/light/main.css"/>
+<script src="https://js.arcgis.com/4.29/"></script>
+<!-- SheetJS — exact same source as the Illinois tool (jsdelivr); local copy is an offline fallback -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script>if(typeof XLSX==="undefined"){document.write('<scr'+'ipt src="xlsx.full.min.js"><\/scr'+'ipt>');}</script>
+<!-- Baked Dominion service-territory polygon (VA + NC), derived from the capacity network. Loads via <script src> so it works from file:// and when served. -->
+<script src="dominion_territory.js"></script>
+<!-- All In-Service transmission lines within VA/NC (all utilities, all kV classes), real geometry, colored/filterable by kV class. -->
+<script src="dominion_transmission.js"></script>
+<!-- Substations (CSV + OSM, deduped). Loads via <script src> (sets window.DOMINION_SUBS_EMBED) so it works in the in-app preview and offline, not just via fetch(). -->
+<script src="dominion_substations.js"></script>
+<style>
+  :root{
+    --navy:#1b2a4a; --navy2:#24385f; --slate:#3b5380; --slate-l:#e8edf6;
+    --accent:#3d7bd9; --ok:#1a9641; --warn:#fdae61; --bad:#d7191c;
+    --ink:#1f2733; --muted:#637088; --line:#d6deea; --panel:#ffffff;
+  }
+  html,body{margin:0;padding:0;height:100%;font-family:"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--ink);}
+  #app{display:flex;height:100vh;width:100vw;overflow:hidden;}
+  /* sidebar */
+  #side{width:380px;min-width:380px;height:100%;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;box-shadow:2px 0 8px rgba(20,30,55,.06);z-index:5;}
+  #brand{background:var(--navy);color:#fff;padding:12px 16px;}
+  #brand h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px;}
+  #brand p{margin:3px 0 0;font-size:11px;color:#aebbd6;}
+  #tabs{display:flex;background:var(--navy2);}
+  #tabs button{flex:1;background:none;border:none;color:#c5d0e6;padding:10px 4px;font-size:12px;font-weight:600;cursor:pointer;border-bottom:3px solid transparent;}
+  #tabs button.on{color:#fff;border-bottom-color:var(--accent);background:rgba(255,255,255,.06);}
+  #panels{flex:1;overflow-y:auto;}
+  .panel{display:none;padding:14px 16px;}
+  .panel.on{display:block;}
+  h2.sec{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--slate);margin:16px 0 8px;border-bottom:1px solid var(--line);padding-bottom:4px;}
+  h2.sec:first-child{margin-top:2px;}
+  label.fld{display:block;font-size:12px;color:var(--muted);margin:8px 0 3px;font-weight:600;}
+  input[type=text],input[type=number],select{width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid var(--line);border-radius:6px;font-size:13px;background:#fff;}
+  .row{display:flex;gap:8px;}
+  .row>div{flex:1;}
+  button.act{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:9px 12px;font-size:13px;font-weight:600;cursor:pointer;width:100%;margin-top:10px;}
+  button.act:hover{background:#2f63b3;}
+  button.ghost{background:#fff;color:var(--slate);border:1px solid var(--slate);}
+  button.ghost:hover{background:var(--slate-l);}
+  .seg{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden;margin-top:4px;}
+  .seg button{flex:1;background:#fff;border:none;padding:8px 4px;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;}
+  .seg button.on{background:var(--slate);color:#fff;}
+  .chk{display:flex;align-items:center;gap:8px;font-size:13px;margin:6px 0;}
+  .chk input{width:auto;}
+  .legend-row{display:flex;align-items:center;gap:8px;font-size:12px;margin:3px 0;}
+  .swatch{width:18px;height:10px;border-radius:2px;display:inline-block;}
+  .pill{display:inline-block;font-size:11px;padding:2px 7px;border-radius:10px;background:var(--slate-l);color:var(--slate);font-weight:600;}
+  .res{border:1px solid var(--line);border-radius:6px;padding:8px;margin:6px 0;font-size:12px;cursor:pointer;background:#fff;}
+  .res:hover{border-color:var(--accent);background:#f5f9ff;}
+  .res b{color:var(--navy);}
+  .res .meta{color:var(--muted);margin-top:2px;}
+  .sum{background:var(--slate-l);border-radius:6px;padding:8px 10px;font-size:12px;margin:8px 0;color:var(--navy);font-weight:600;}
+  .site{border:1px solid var(--line);border-radius:6px;padding:8px;margin:6px 0;font-size:12px;background:#fff;position:relative;}
+  .site .q{position:absolute;top:6px;right:6px;font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;}
+  .q.yes{background:#dff3e3;color:var(--ok);}
+  .q.no{background:#fde8e8;color:var(--bad);}
+  .site .x{position:absolute;bottom:6px;right:6px;color:var(--muted);cursor:pointer;font-size:11px;}
+  .muted{color:var(--muted);font-size:11px;}
+  .hint{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.4;}
+  #mapwrap{flex:1;position:relative;}
+  #map{position:absolute;inset:0;}
+  #status{position:absolute;left:12px;bottom:12px;background:rgba(27,42,74,.92);color:#fff;font-size:12px;padding:6px 12px;border-radius:6px;z-index:30;max-width:60%;display:none;}
+  .esri-popup__main-container{max-width:320px;}
+  .fp{font-size:12px;line-height:1.5;}
+  .fp b{color:var(--navy);}
+  table.fp{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px;}
+  table.fp td{padding:2px 4px;border-bottom:1px solid var(--line);}
+  table.fp td:first-child{color:var(--muted);width:48%;}
+  .divider{height:1px;background:var(--line);margin:12px 0;}
+  .small{font-size:11px;}
+  table.fp td.sub{background:var(--slate-l);color:var(--navy);font-weight:700;font-size:10px;letter-spacing:.5px;padding-top:6px;}
+  .chip{font-size:11px;border:1px solid var(--line);}
+  .chip:hover{background:var(--accent);color:#fff;border-color:var(--accent);}
+  .lnk{color:var(--accent);cursor:pointer;font-size:11px;font-weight:600;}
+  .lnk:hover{text-decoration:underline;}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="side">
+    <div id="brand">
+      <h1>Dominion Hosting Capacity &amp; Siting</h1>
+      <p>Virginia + North Carolina &middot; PV/BESS + EV load &middot; live ArcGIS data</p>
+    </div>
+    <div id="tabs">
+      <button data-tab="layers" class="on">Layers</button>
+      <button data-tab="find">Find</button>
+      <button data-tab="sites">Sites</button>
+      <button data-tab="foot">Footprint</button>
+    </div>
+    <div id="panels">
+
+      <!-- LAYERS -->
+      <div class="panel on" id="p-layers">
+        <h2 class="sec">Network</h2>
+        <label class="fld">Capacity layer</label>
+        <div class="seg" id="modeSeg">
+          <button data-mode="both" class="on">Both</button>
+          <button data-mode="load">EV load</button>
+          <button data-mode="gen">PV / BESS</button>
+        </div>
+        <div class="hint">Generation/BESS interconnects on the <b>Primary</b> (PV) side; load uses the <b>EV</b> layer. Values are available capacity in MW. In <b>Both</b>, lines are colored by the average of available gen &amp; load capacity.</div>
+
+        <h2 class="sec">Capacity legend (MW)</h2>
+        <div id="legendCap"></div>
+
+        <h2 class="sec">Service territory</h2>
+        <div class="chk"><input type="checkbox" id="terrOn" checked/><label for="terrOn">Show service-territory footprint</label></div>
+        <div class="legend-row"><span class="swatch" style="background:rgba(61,123,217,.4)"></span><span>Virginia (Dominion) territory</span></div>
+        <div class="legend-row"><span class="swatch" style="background:rgba(26,150,65,.4)"></span><span>North Carolina (Dominion) territory</span></div>
+        <div class="hint">The shaded area is where Dominion publishes capacity (PV/EV) data — i.e. the served territory. <b>Substations and candidate sites are filtered to this footprint</b>; anything outside is excluded from the analysis.</div>
+
+        <h2 class="sec">Substations</h2>
+        <div class="chk"><input type="checkbox" id="subOn" checked/><label for="subOn">Show substations (within service territory)</label></div>
+        <label class="fld">Class filter</label>
+        <select id="subClass">
+          <option value="all">All classes</option>
+          <option value="ehv">Transmission-EHV (&ge;230 kV)</option>
+          <option value="trans">Transmission (115&ndash;229 kV)</option>
+          <option value="subt">Sub-transmission (69&ndash;114 kV)</option>
+          <option value="dist">Distribution (&lt;69 kV)</option>
+        </select>
+        <label class="fld">Minimum voltage (kV): <span id="kvLbl">0</span></label>
+        <input type="range" id="subKv" min="0" max="500" step="5" value="0" style="width:100%"/>
+        <div id="legendSub"></div>
+        <button class="act ghost" id="subExportBtn" style="margin-top:6px">Export substations (Excel)</button>
+
+        <h2 class="sec">Transmission lines</h2>
+        <div class="chk"><input type="checkbox" id="txOn" checked/><label for="txOn">Show transmission lines (In Service)</label></div>
+        <label class="fld">Voltage class</label>
+        <select id="txClass">
+          <option value="all">All classes</option>
+          <option value="c735">735 kV &amp; above</option>
+          <option value="c500">500 kV</option>
+          <option value="c345">345 kV</option>
+          <option value="c220">220&ndash;287 kV</option>
+          <option value="c100">100&ndash;161 kV</option>
+          <option value="u100">Under 100 kV (incl. 69)</option>
+          <option value="na">Unknown kV</option>
+        </select>
+        <div id="legendTx"></div>
+        <div class="hint">Every In-Service transmission line within Virginia or North Carolina — <b>all utilities</b> (Dominion, AEP, Duke, co-ops…), drawn with real line geometry and colored by kV class. <b>Not</b> clipped to the service territory. Click a line for details.</div>
+        <div class="muted small" id="txCount"></div>
+
+        <h2 class="sec">Candidate sites</h2>
+        <div class="chk"><input type="checkbox" id="schoolOn"/><label for="schoolOn">Show all NCES schools (VA+NC preview)</label></div>
+        <button class="act ghost" id="loadSchoolsBtn">Load in-territory schools as candidate sites</button>
+        <div class="hint">Schools are the demand-side site universe: large, distributed, already-served parcels. Only schools inside the Dominion service territory (where capacity data exists) are shown/loaded.</div>
+      </div>
+
+      <!-- FIND -->
+      <div class="panel" id="p-find">
+        <h2 class="sec">Capacity filter</h2>
+        <div class="row">
+          <div>
+            <label class="fld">Min generation / BESS (MW)</label>
+            <input type="number" id="genMin" value="0" min="0" step="0.5"/>
+          </div>
+          <div>
+            <label class="fld">Min load (MW)</label>
+            <input type="number" id="loadMin" value="0" min="0" step="0.5"/>
+          </div>
+        </div>
+        <label class="fld">Operating voltage floor (kV, optional)</label>
+        <input type="number" id="voltMin" value="0" min="0" step="0.1"/>
+
+        <h2 class="sec">Spatial (optional)</h2>
+        <div class="chk"><input type="checkbox" id="useCenter"/><label for="useCenter">Limit to radius around a center point</label></div>
+        <div class="row">
+          <div><label class="fld">Center lon</label><input type="number" id="ctrLon" step="0.0001" placeholder="-78.8"/></div>
+          <div><label class="fld">Center lat</label><input type="number" id="ctrLat" step="0.0001" placeholder="37.2"/></div>
+        </div>
+        <label class="fld">Search radius (mi)</label>
+        <input type="number" id="ctrRad" value="10" min="0.5" step="0.5"/>
+        <div class="hint">Tip: switch to the <b>Footprint</b> tab and click the map to capture a center point.</div>
+
+        <h2 class="sec">Dual-use eligibility</h2>
+        <label class="fld">Eligibility distance (mi)</label>
+        <input type="number" id="eligDist" value="1" min="0.1" step="0.1"/>
+        <label class="fld">Substation-count radius (mi)</label>
+        <input type="number" id="subRad" value="3" min="0.5" step="0.5"/>
+        <div class="hint">A site qualifies for <b>large load + BESS</b> when an EV segment &ge; load-min <b>and</b> a Primary segment &ge; gen-min lie within the eligibility distance.</div>
+
+        <h2 class="sec">Site eligibility (optional)</h2>
+        <label class="fld">Require a substation within (mi) <span class="muted">— blank = not required</span></label>
+        <input type="number" id="subElig" min="0" step="0.5" placeholder="not required"/>
+        <label class="fld">Require a transmission line within (mi) <span class="muted">— blank = not required</span></label>
+        <input type="number" id="txElig" min="0" step="0.5" placeholder="not required"/>
+        <label class="fld">Transmission voltage class</label>
+        <select id="txEligClass">
+          <option value="all">Any kV class</option>
+          <option value="c735">735 kV &amp; above</option>
+          <option value="c500">500 kV</option>
+          <option value="c345">345 kV</option>
+          <option value="c220">220&ndash;287 kV</option>
+          <option value="c100">100&ndash;161 kV</option>
+          <option value="u100">Under 100 kV (incl. 69)</option>
+          <option value="na">Unknown kV</option>
+        </select>
+        <div class="hint">Substation &amp; transmission criteria are optional — leave blank to not require them. Nearest distances are always computed &amp; exported.</div>
+
+        <button class="act" id="runFind">Run Find</button>
+        <button class="act ghost" id="clearFind">Clear filter</button>
+
+        <div id="findSum"></div>
+        <div id="findRes"></div>
+      </div>
+
+      <!-- SITES -->
+      <div class="panel" id="p-sites">
+        <h2 class="sec">Add a site</h2>
+        <div class="row">
+          <div><label class="fld">Lon</label><input type="number" id="addLon" step="0.0001"/></div>
+          <div><label class="fld">Lat</label><input type="number" id="addLat" step="0.0001"/></div>
+        </div>
+        <label class="fld">Name (optional)</label>
+        <input type="text" id="addName" placeholder="Site name"/>
+        <div class="row">
+          <div><button class="act" id="addSiteBtn">Add site</button></div>
+          <div><button class="act ghost" id="addHereBtn">Add at my location</button></div>
+        </div>
+        <div class="hint">Or click the map (Footprint tab) to capture coordinates, or use the search box on the map.</div>
+
+        <h2 class="sec">Upload sites</h2>
+        <input type="file" id="upSites" accept=".xlsx,.xls,.csv,.json"/>
+        <div class="hint">Excel/CSV needs <b>lat, lon</b> (or <b>latitude, longitude</b>); rows with only an <b>address</b> are geocoded. <b>Each sheet</b> becomes its own colored layer. Or load a saved <b>.json</b> session.</div>
+
+        <h2 class="sec">Site analysis <span class="pill" id="siteCount">0</span></h2>
+        <div class="hint">Press <b>Run Find</b> (in the <b>Find</b> tab) to analyze every loaded site against the current parameters — it highlights matching feeders <i>and</i> analyzes the sites in one step. Each site shows feeders + sum gen/load within 0.1/0.3/0.5 mi, qualifying feeders, nearest substation &amp; transmission line. With criteria set, only matching sites are listed (click feeder/substation chips to zoom).</div>
+        <label class="fld">Sort by</label>
+        <select id="sortBy">
+          <option value="gen">Generation (high → low)</option>
+          <option value="load">Load (high → low)</option>
+          <option value="name">Name (A → Z)</option>
+        </select>
+        <div class="row" style="margin-top:8px">
+          <div><button class="act" id="exportBtn">Export Excel</button></div>
+          <div><button class="act ghost" id="clearSites">Clear</button></div>
+        </div>
+        <div class="row">
+          <div><button class="act ghost" id="saveBtn">Save .json</button></div>
+          <div><button class="act ghost" id="standaloneBtn">Save standalone (.html)</button></div>
+        </div>
+        <div id="siteList"></div>
+
+        <h2 class="sec">Coordinate capture</h2>
+        <div class="hint">Toggle on, then click anywhere on the map to log each point's time, county, and lon/lat. Export to CSV.</div>
+        <div class="row">
+          <div><button class="act ghost" id="capToggle">Capture: off</button></div>
+          <div><button class="act ghost" id="capClear">Clear</button></div>
+        </div>
+        <button class="act" id="capExport" style="display:none;margin-top:6px">Export captured points (CSV)</button>
+        <div id="capList" class="muted small" style="margin-top:6px">No captured points yet.</div>
+      </div>
+
+      <!-- FOOTPRINT -->
+      <div class="panel" id="p-foot">
+        <h2 class="sec">Site footprint</h2>
+        <div class="hint">Adds <b>lot area</b> (VGIN/NC&nbsp;OneMap parcels), <b>building area</b> (USA Structures), and <b>outdoor area</b> (lot − building) to each site. If no parcel is found in either statewide layer the site is flagged (no estimate).</div>
+
+        <h2 class="sec">All loaded sites</h2>
+        <label class="fld">Parallel requests <span class="muted">(lower this if a parcel server rate-limits)</span></label>
+        <input type="number" id="fpParallel" value="5" min="1" max="12"/>
+        <div class="chk"><input type="checkbox" id="fpOnlyMatch"/><label for="fpOnlyMatch">Only sites matching the current Find parameters</label></div>
+        <div class="chk"><input type="checkbox" id="fpWhole"/><label for="fpWhole">Whole property (add touching same-owner parcels — NC)</label></div>
+        <button class="act" id="fpAnalyzeBtn">Analyze footprint — all sites</button>
+        <div class="hint">Load schools first (Layers → "Load in-territory schools"), then run this to footprint every school at once.</div>
+        <div id="fpSummary" class="muted small" style="margin-top:8px"></div>
+        <div id="fpResults"></div>
+        <button class="act" id="fpExportBtn" style="display:none;margin-top:8px">Export footprint analysis (Excel)</button>
+
+        <h2 class="sec">Single point</h2>
+        <div class="chk"><input type="checkbox" id="clickCapture" checked/><label for="clickCapture">Click the map to capture &amp; analyze one point</label></div>
+        <button class="act ghost" id="analyzeLast">Analyze last captured point</button>
+        <div class="divider"></div>
+        <div id="footOut" class="fp muted">Click a point on the map to compute parcel area, building footprint, owner, and nearby substations.</div>
+
+        <details style="margin-top:12px">
+          <summary class="muted small" style="cursor:pointer">Advanced: where parcel data comes from</summary>
+          <div class="hint">Through the included local server (<code>server.py</code>) or the Cloudflare Worker for static hosting, parcel/building lookups work automatically — <b>leave the box empty for local use</b>. Only set it if you host the page statically: paste your Worker URL.
+          <input type="text" id="proxyBase" placeholder="(leave empty for local server)" style="margin-top:6px"/></div>
+        </details>
+      </div>
+
+    </div>
+  </div>
+  <div id="mapwrap">
+    <div id="map"></div>
+    <div id="status"></div>
+  </div>
+</div>
+
+<script>
+/* =========================================================================
+   TERRITORY ADAPTER  — the only thing that changes between territories.
+   (Illinois would be the same object with kW/index value semantics.)
+   ========================================================================= */
+var TERRITORY = {
+  id:"dominion", label:"Dominion (VA+NC)",
+  defaultMode:"both",
+  capacity:[
+    { role:"gen",  label:"PV / Generation (+BESS)",
+      url:"https://services.arcgis.com/DmE6Z8jKWf8lv84J/ArcGIS/rest/services/Primary_Hosting_Capacity_Available_EB/FeatureServer/6",
+      valueField:"LIMIT_VAL", voltField:"OPERATINGVOLTAGE", unit:"MW", geom:"polyline",
+      breaksMW:[1,4,8,16] },
+    { role:"load", label:"EV / Load",
+      url:"https://services.arcgis.com/DmE6Z8jKWf8lv84J/ArcGIS/rest/services/EV_Hosting_Capacity_Available_EB/FeatureServer/14",
+      valueField:"LIMIT_VAL", voltField:"OPERATINGVOLTAGE", unit:"MW", geom:"polyline",
+      breaksMW:[1,3,5] }
+  ],
+  substations:{ file:"dominion_substations.json",   // primary (CSV/OSM, 5,121) when served; falls back to HIFLD live
+                url:"https://services5.arcgis.com/HDRa0B57OVrv2E1q/arcgis/rest/services/Electric_Substations/FeatureServer/0",
+                where:"STATE IN ('VA','NC')", kvField:"MAX_VOLT" },
+  schools:{ url:"https://services1.arcgis.com/Ua5sjt3LWTPigjyD/arcgis/rest/services/Public_School_Locations_Current/FeatureServer/0",
+            where:"STATE IN ('VA','NC')" },
+  parcels:{
+    VA:"https://vginmaps.vdem.virginia.gov/arcgis/rest/services/VA_Base_Layers/VA_Parcels/FeatureServer/0",
+    NC:"https://services.nconemap.gov/secure/rest/services/NC1Map_Parcels/MapServer/1"
+  },
+  buildings:"https://services2.arcgis.com/FiaPA4ga0iQKduv3/arcgis/rest/services/USA_Structures_View/FeatureServer/0",
+  view:{ center:[-78.8,37.4], zoom:7 }
+};
+
+/* ---- locked calculation contract (copy verbatim per playbook) ---- */
+function haversineMi(la1,lo1,la2,lo2){ var R=3958.8,
+  dLa=(la2-la1)*Math.PI/180,dLo=(lo2-lo1)*Math.PI/180,
+  a=Math.sin(dLa/2)*Math.sin(dLa/2)+Math.cos(la1*Math.PI/180)*Math.cos(la2*Math.PI/180)*Math.sin(dLo/2)*Math.sin(dLo/2);
+  return 2*R*Math.asin(Math.sqrt(a)); }
+function fmtMW(v){ return (v==null||isNaN(v))?"-":(Math.round(v*100)/100); }
+function kvOf(code){ if(code==null||isNaN(code)) return null; return Math.round(code/100)/10; } // coded volts -> kV
+
+/* ---- substation class buckets (by max kV) ---- */
+function subClassOf(kv){ if(kv==null||kv<0) return "Undetermined";
+  if(kv>=230) return "Transmission-EHV"; if(kv>=115) return "Transmission";
+  if(kv>=69) return "Sub-transmission"; return "Distribution"; }
+var SUB_COLORS={ "Transmission-EHV":[178,24,43],"Transmission":[214,96,77],
+  "Sub-transmission":[244,165,130],"Distribution":[103,169,207],"Undetermined":[150,150,150] };
+
+/* ---- transmission voltage-class metadata (by kV class) ---- */
+var TX_CLASSES=[
+  {code:"c735",label:"735 kV & above",color:[20,20,20],  width:3.2},
+  {code:"c500",label:"500 kV",        color:[150,0,180], width:3.0},
+  {code:"c345",label:"345 kV",        color:[220,30,30], width:2.6},
+  {code:"c220",label:"220–287 kV",    color:[240,140,0], width:2.2},
+  {code:"c100",label:"100–161 kV",    color:[40,110,210],width:1.8},
+  {code:"u100",label:"Under 100 kV",  color:[0,158,158], width:1.4},
+  {code:"na",  label:"Unknown kV",    color:[150,150,150],width:1.2}
+];
+var TX_META={}; TX_CLASSES.forEach(function(c){ TX_META[c.code]=c; });
+
+/* ---- capacity color ramp (low=red -> high=green) ---- */
+function capRamp(n){ // n breaks -> n+1 colors red..green
+  var base=["#d7191c","#fdae61","#ffffbf","#a6d96a","#1a9641","#0a6b2c"];
+  return base.slice(0,n+1);
+}
+</script>
+
+<script>
+require([
+  "esri/Map","esri/views/MapView","esri/layers/FeatureLayer","esri/layers/GraphicsLayer",
+  "esri/Graphic","esri/geometry/Point","esri/geometry/Circle","esri/geometry/geometryEngine",
+  "esri/geometry/support/webMercatorUtils","esri/widgets/Search","esri/widgets/Home",
+  "esri/widgets/Locate","esri/widgets/ScaleBar","esri/rest/support/Query","esri/request",
+  "esri/widgets/BasemapToggle","esri/layers/support/FeatureFilter","esri/geometry/Polygon"
+],function(Map,MapView,FeatureLayer,GraphicsLayer,Graphic,Point,Circle,geometryEngine,
+  webMercatorUtils,Search,Home,Locate,ScaleBar,Query,esriRequest,
+  BasemapToggle,FeatureFilter,Polygon){
+
+"use strict";
+var statusEl=document.getElementById("status");
+function status(msg){ if(!msg){statusEl.style.display="none";return;} statusEl.textContent=msg; statusEl.style.display="block"; }
+
+/* ---------------- map ---------------- */
+var map=new Map({ basemap:"gray-vector" });
+var view=new MapView({ container:"map", map:map,
+  center:TERRITORY.view.center, zoom:TERRITORY.view.zoom });
+// Take full manual control of the popup. Otherwise the view's built-in click
+// handling races our custom handler — it opens, then the default logic finds no
+// template-enabled feature and immediately closes it (the "gray circle that flashes").
+view.popupEnabled=false;
+view.when(function(){ if(view.popup){ view.popup.autoOpenEnabled=false; view.popup.dockEnabled=false; } });
+view.ui.add(new Home({view:view}),"top-left");
+view.ui.add(new Locate({view:view}),"top-left");
+view.ui.add(new ScaleBar({view:view,unit:"dual"}),"bottom-right");
+// satellite toggle: gray streets <-> hybrid (satellite imagery + labels)
+view.ui.add(new BasemapToggle({view:view, nextBasemap:"hybrid", visibleElements:{title:true}}),"bottom-left");
+var search=new Search({view:view, popupEnabled:false, resultGraphicEnabled:false });
+view.ui.add(search,"top-right");
+search.on("select-result",function(e){ if(e.result&&e.result.feature){ var g=e.result.feature.geometry;
+  var gp=webMercatorUtils.webMercatorToGeographic(g); captureSite(gp.x,gp.y,e.result.name); } });
+
+/* graphics layers (drawn above feature layers) */
+var territoryLyr=new GraphicsLayer({title:"Service territory"});
+var glowLyr=new GraphicsLayer();   // Find run: all matching segments
+var selLyr=new GraphicsLayer();    // single click selection (cleared each click)
+var siteLyr=new GraphicsLayer(); var centerLyr=new GraphicsLayer();
+
+/* ---------------- capacity renderers ---------------- */
+var CAP_FLOOR=-1;
+// Scale-dependent line width so dense feeders stay crisp (don't "blob") when zoomed out.
+function lineSizeVV(){ return { type:"size", valueExpression:"$view.scale",
+  stops:[ {value:9000,size:4}, {value:36000,size:3}, {value:144000,size:1.8},
+          {value:577000,size:1.1}, {value:2300000,size:0.6} ] }; }
+function capRenderer(cfg){
+  var breaks=cfg.breaksMW, cols=capRamp(breaks.length), infos=[], prev=CAP_FLOOR;
+  for(var i=0;i<breaks.length;i++){
+    infos.push({ minValue:prev, maxValue:breaks[i],
+      symbol:{type:"simple-line",color:cols[i],width:3.2},
+      label:(i===0?"≤":fmtMW(prev)+"–")+fmtMW(breaks[i])+" MW" });
+    prev=breaks[i];
+  }
+  infos.push({ minValue:prev, maxValue:99999,
+    symbol:{type:"simple-line",color:cols[breaks.length],width:4},
+    label:">"+fmtMW(prev)+" MW" });
+  return { type:"class-breaks", field:cfg.valueField, defaultSymbol:{type:"simple-line",color:[120,120,120],width:1}, classBreakInfos:infos, visualVariables:[lineSizeVV()] };
+}
+
+var capLayers={};
+TERRITORY.capacity.forEach(function(cfg){
+  var lyr=new FeatureLayer({
+    url:cfg.url, title:cfg.label, outFields:["*"], renderer:capRenderer(cfg),
+    popupEnabled:false, opacity:0.9
+  });
+  lyr._cfg=cfg; capLayers[cfg.role]=lyr; map.add(lyr);
+});
+
+/* ---------------- substations (CSV/OSM file primary, HIFLD live fallback) ---------------- */
+var SUBF={name:"NAME",kv:"MAX_VOLT",classField:null,status:"STATUS",county:"COUNTY",state:"STATE"};
+var subBaseWhere="1=1";
+var subLayer=null;
+function subInfos(){ return Object.keys(SUB_COLORS).map(function(k){
+  return { value:k, symbol:{type:"simple-marker",style:"square",size:6,color:SUB_COLORS[k],
+    outline:{color:[255,255,255,0.7],width:0.5}}, label:k }; }); }
+function subRendererArcade(kvField){ return { type:"unique-value",
+  valueExpression:"var v=$feature."+kvField+";if(v==null||v<0){return 'Undetermined';}"+
+    "if(v>=230){return 'Transmission-EHV';}if(v>=115){return 'Transmission';}"+
+    "if(v>=69){return 'Sub-transmission';}return 'Distribution';",
+  uniqueValueInfos:subInfos(), defaultSymbol:{type:"simple-marker",style:"square",size:5,color:[150,150,150]} }; }
+function subRendererField(classField){ return { type:"unique-value", field:classField,
+  uniqueValueInfos:subInfos(), defaultSymbol:{type:"simple-marker",style:"square",size:5,color:[150,150,150]} }; }
+function subPopup(){ return { title:"{"+SUBF.name+"}", content:function(f){ var a=f.graphic.attributes; var kv=a[SUBF.kv];
+  return "<div class='fp'><b>"+(SUBF.classField?a[SUBF.classField]:subClassOf(kv))+"</b><table class='fp'>"+
+    "<tr><td>Max voltage</td><td>"+(kv>0?kv+" kV":"unknown")+"</td></tr>"+
+    "<tr><td>Status</td><td>"+(a[SUBF.status]||"-")+"</td></tr>"+
+    "<tr><td>County / State</td><td>"+(a[SUBF.county]||"-")+", "+(a[SUBF.state]||"-")+"</td></tr></table></div>"; } }; }
+// fetch HIFLD substations into the same {lon,lat,maxkv,...} array shape as the CSV file
+function fetchHifldArray(){
+  var lyr=new FeatureLayer({ url:TERRITORY.substations.url, definitionExpression:TERRITORY.substations.where });
+  return lyr.load().then(function(){ return queryAllFeatures(lyr,TERRITORY.substations.where); })
+    .then(function(feats){ return feats.map(function(f){ var a=f.attributes,g=f.geometry;
+        return { name:a.NAME, lon:g?g.longitude:null, lat:g?g.latitude:null,
+          maxkv:(a.MAX_VOLT>0?a.MAX_VOLT:null), minkv:a.MIN_VOLT, county:a.COUNTY, state:a.STATE, status:a.STATUS, stype:a.TYPE }; })
+      .filter(function(s){ return s.lon!=null; }); })
+    .catch(function(){ return []; });
+}
+function buildFileSubs(arr){
+  SUBF={name:"name",kv:"maxkv",classField:"class",status:"status",county:"county",state:"state"};
+  subBaseWhere="1=1";
+  // strict clip: only keep substations inside the service territory (removed from the layer, not just hidden)
+  if(territoryGrid||territoryMask){ arr=arr.filter(function(s){ return inTerritory(s.lon,s.lat); }); }
+  subClassCounts={}; subTotal=0;
+  var graphics=arr.map(function(s,i){ var cls=s["class"]||subClassOf(s.maxkv);
+    subClassCounts[cls]=(subClassCounts[cls]||0)+1; subTotal++;
+    return new Graphic({
+    geometry:new Point({longitude:s.lon,latitude:s.lat}),
+    attributes:{OBJECTID:i+1,name:s.name||"",maxkv:(s.maxkv==null?-1:s.maxkv),minkv:(s.minkv==null?-1:s.minkv),
+      "class":cls,county:s.county||"",state:s.state||"",status:s.status||"",stype:s.stype||""} }); });
+  return new FeatureLayer({ source:graphics, objectIdField:"OBJECTID", geometryType:"point",
+    spatialReference:{wkid:4326}, title:"Substations (CSV/OSM)",
+    fields:[{name:"OBJECTID",type:"oid"},{name:"name",type:"string"},{name:"maxkv",type:"double"},
+      {name:"minkv",type:"double"},{name:"class",type:"string"},{name:"county",type:"string"},
+      {name:"state",type:"string"},{name:"status",type:"string"},{name:"stype",type:"string"}],
+    renderer:subRendererField("class"), popupTemplate:subPopup() }); }
+function initSubstations(){
+  var cfg=TERRITORY.substations;
+  var src;
+  if(window.DOMINION_SUBS_EMBED && window.DOMINION_SUBS_EMBED.length){ src=Promise.resolve(window.DOMINION_SUBS_EMBED); } // standalone copy
+  else src = cfg.file ? fetch(cfg.file+"?v="+Date.now(),{cache:"no-store"}).then(function(r){return r.ok?r.json():null;}).catch(function(){return null;}) : Promise.resolve(null);
+  return src.then(function(arr){ return (arr&&arr.length)?arr:fetchHifldArray(); })
+  .then(function(arr){
+    window.__subArr=arr||[];           // keep the raw array for the standalone-HTML export
+    subLayer=buildFileSubs(arr||[]);   // always client-side -> clipped to territory by inTerritory()
+    subLayer.visible=document.getElementById("subOn").checked;
+    map.add(subLayer);
+    bringToTop([glowLyr,selLyr,siteLyr,centerLyr]);
+    buildSubLegend();   // refresh legend with live per-class counts
+    return subLayer;
+  });
+}
+
+/* ---------------- schools ---------------- */
+var schoolLayer=new FeatureLayer({
+  url:TERRITORY.schools.url, title:"NCES schools",
+  definitionExpression:TERRITORY.schools.where, visible:false,
+  outFields:["NCESSCH","NAME","STREET","CITY","STATE","ZIP","NMCNTY","LAT","LON"],
+  renderer:{ type:"simple", symbol:{type:"simple-marker",style:"diamond",size:6,
+    color:[61,123,217,0.9],outline:{color:[255,255,255,0.8],width:0.6}} },
+  popupTemplate:{ title:"{NAME}", content:"{STREET}, {CITY}, {STATE} {ZIP}<br>{NMCNTY}" }
+});
+map.add(schoolLayer);
+
+map.add(territoryLyr,0);            // service-territory outline at the bottom
+map.addMany([glowLyr,selLyr,siteLyr,centerLyr]);
+
+function bringToTop(layers){ layers.forEach(function(l){ if(l && map.layers.indexOf(l)>=0) map.reorder(l,map.layers.length-1); }); }
+
+/* ===== paginated query helper ===== */
+function queryAllFeatures(layer,where){
+  return new Promise(function(resolve,reject){
+    var acc=[];
+    (function page(off){
+      layer.queryFeatures({where:where||"1=1",outFields:["*"],returnGeometry:true,outSpatialReference:{wkid:4326},
+        maxAllowableOffset:0.0002,geometryPrecision:6,start:off,num:2000,orderByFields:["OBJECTID"]})
+      .then(function(r){ acc.push.apply(acc,r.features);
+        if(r.features.length===2000) page(off+2000); else resolve(acc); }).catch(reject);
+    })(0);
+  });
+}
+var genFeatsP=null, loadFeatsP=null;
+function getGenFeats(){ return genFeatsP||(genFeatsP=queryAllFeatures(capLayers.gen,"1=1")); }
+function getLoadFeats(){ return loadFeatsP||(loadFeatsP=queryAllFeatures(capLayers.load,"1=1")); }
+
+/* ---- in-memory capacity index: load the whole gen/load network ONCE into a
+   vertex grid (coords normalized to lon/lat via toLL, since the bulk query returns
+   Web Mercator). Every per-site scan then runs client-side against the grid and
+   measures the nearest ACTUAL line vertex to the site — no server round-trips,
+   no centroid approximation, and dissolved feeders are handled correctly. ---- */
+var capCache=null, capCacheP=null;
+var CAP_CELL=0.02; // ~1.4 mi grid cells
+function buildCapIndex(feats,cfg){
+  var grid={}, vf=cfg.valueField, tf=cfg.voltField, cell=CAP_CELL;
+  // Bin each LINE SEGMENT into every grid cell it passes through. Indexing segments
+  // (not just vertices) is essential: the bulk query generalizes geometry, so a long
+  // straight feeder keeps only its end vertices — a click/site in the middle must still
+  // measure distance to the segment, not to a far-away vertex.
+  function bin(seg){
+    var ax=seg.a[0],ay=seg.a[1],bx=seg.b[0],by=seg.b[1];
+    var steps=Math.max(1,Math.ceil(Math.max(Math.abs(bx-ax),Math.abs(by-ay))/(cell*0.5))), seen={};
+    for(var t=0;t<=steps;t++){ var x=ax+(bx-ax)*(t/steps), y=ay+(by-ay)*(t/steps);
+      var k=Math.floor(x/cell)+","+Math.floor(y/cell);
+      if(!seen[k]){ seen[k]=1; (grid[k]||(grid[k]=[])).push(seg); } }
+  }
+  feats.forEach(function(f){ var g=f.geometry; if(!g||!g.paths) return;
+    var mw=f.attributes[vf], volt=f.attributes[tf], oid=f.attributes.OBJECTID;
+    g.paths.forEach(function(p){
+      if(p.length===1){ var s0=toLL(p[0][0],p[0][1]); bin({a:s0,b:s0,mw:mw,volt:volt,oid:oid}); return; }
+      for(var i=0;i+1<p.length;i++){
+        bin({a:toLL(p[i][0],p[i][1]), b:toLL(p[i+1][0],p[i+1][1]), mw:mw, volt:volt, oid:oid}); }
+    }); });
+  return {grid:grid,cell:cell};
+}
+// nearest point on each feeder's line SEGMENTS within maxMi of (lon,lat).
+// Measures point-to-segment distance, so it works on generalized/sparse-vertex lines.
+function scanIndex(idx,lon,lat,maxMi){
+  if(!idx) return {list:[],best:0,nearDist:null,nearKv:null};
+  var cell=idx.cell, gx=Math.floor(lon/cell), gy=Math.floor(lat/cell);
+  var rc=Math.ceil((maxMi/55)/cell)+1, kx=Math.cos(lat*Math.PI/180)||1, byOid={};
+  for(var dx=-rc;dx<=rc;dx++)for(var dy=-rc;dy<=rc;dy++){
+    var arr=idx.grid[(gx+dx)+","+(gy+dy)]; if(!arr) continue;
+    for(var i=0;i<arr.length;i++){ var s=arr[i];
+      // local equirectangular miles (site at origin), then point-to-segment distance
+      var Ax=(s.a[0]-lon)*kx*69, Ay=(s.a[1]-lat)*69, Bx=(s.b[0]-lon)*kx*69, By=(s.b[1]-lat)*69;
+      var ddx=Bx-Ax, ddy=By-Ay, L2=ddx*ddx+ddy*ddy;
+      var t=L2>0?-((Ax*ddx+Ay*ddy)/L2):0; t=t<0?0:(t>1?1:t);
+      var cx=Ax+t*ddx, cy=Ay+t*ddy, d=Math.sqrt(cx*cx+cy*cy);
+      if(d>maxMi) continue; var o=s.oid, cur=byOid[o];
+      if(!cur||d<cur.dist) byOid[o]={mw:s.mw,volt:s.volt,dist:d,lon:lon+(cx/69)/kx,lat:lat+cy/69}; } }
+  var list=[],best=0,bd=1e9,bkv=null;
+  Object.keys(byOid).forEach(function(o){ var e=byOid[o];
+    if(e.mw>best)best=e.mw; if(e.dist<bd){bd=e.dist;bkv=kvOf(e.volt);}
+    list.push({mw:e.mw,dist:e.dist,lon:e.lon,lat:e.lat,oid:o,volt:e.volt}); });
+  return {list:list,best:best,nearDist:(bd===1e9?null:bd),nearKv:bkv};
+}
+function ensureCapCache(){
+  if(capCacheP) return capCacheP;
+  status("Loading capacity network for fast analysis…");
+  capCacheP=Promise.all([getGenFeats(),getLoadFeats()]).then(function(r){
+    capCache={ gen:buildCapIndex(r[0],capLayers.gen._cfg), load:buildCapIndex(r[1],capLayers.load._cfg) };
+    status(""); return capCache;
+  }).catch(function(e){ status("Capacity preload error: "+e.message); capCacheP=null; });
+  return capCacheP;
+}
+/* ramp color for a MW value (matches the class-break legend); returns [r,g,b] */
+function hexToRgb(h){ h=String(h).replace("#",""); return [parseInt(h.substr(0,2),16),parseInt(h.substr(2,2),16),parseInt(h.substr(4,2),16)]; }
+function capColorRGB(role,mw){
+  var cfg=capLayers[role]._cfg, breaks=cfg.breaksMW, cols=capRamp(breaks.length);
+  for(var i=0;i<breaks.length;i++){ if(mw<=breaks[i]) return hexToRgb(cols[i]); }
+  return hexToRgb(cols[breaks.length]);
+}
+
+/* ===== service-territory mask =====
+   Prefers an authoritative boundary file (dominion_territory.geojson, generated
+   from the HIFLD service-territory shapefiles by fetch_territory.py). Falls back
+   to a boundary derived by buffering the capacity network if the file is absent. */
+var territoryMask=null, territoryGrid=null, TERR_RADIUS=3, TERRITORY_FILE="dominion_territory.geojson", territorySource="buffered network";
+function drawTerritory(){
+  territoryLyr.removeAll();
+  if(territoryMask) try{ territoryLyr.add(new Graphic({geometry:territoryMask,
+    symbol:{type:"simple-fill",color:[61,123,217,0.04],
+      outline:{color:[27,42,74,0.6],width:1.6,style:"short-dash"}}})); }catch(e){}
+}
+function polysFromGeoJSON(gj){
+  var polys=[];
+  (gj.features||[]).forEach(function(f){ var g=f.geometry; if(!g) return;
+    if(g.type==="Polygon"){ polys.push(new Polygon({rings:g.coordinates,spatialReference:{wkid:4326}})); }
+    else if(g.type==="MultiPolygon"){ g.coordinates.forEach(function(p){ polys.push(new Polygon({rings:p,spatialReference:{wkid:4326}})); }); } });
+  return polys;
+}
+// ===== service-territory footprint from the dense gen+load network =====
+// occupancy grid of network vertices: { "gx,gy": 1 } at TERR_CELL°.
+var TERR_CELL=0.05, TERR_D=1;     // ±1 cell of 0.05° ≈ within ~3–4 mi of a line = in territory
+var VA_NC_LAT=36.5407;            // VA/NC border (36°30') — splits the two Dominion territories for display
+// queryFeatures sometimes returns geometry in Web Mercator despite outSpatialReference:{wkid:4326} — normalize raw coords to lon/lat
+function toLL(x,y){ if(Math.abs(x)>180||Math.abs(y)>90){ try{ var p=webMercatorUtils.xyToLngLat(x,y); return [p[0],p[1]]; }catch(e){} } return [x,y]; }
+function buildVertexGrid(featArrs){ var grid={},cell=TERR_CELL;
+  featArrs.forEach(function(feats){ feats.forEach(function(f){ var g=f&&f.geometry; if(!g||!g.paths) return;
+    g.paths.forEach(function(p){ for(var i=0;i<p.length;i++){ var ll=toLL(p[i][0],p[i][1]); grid[Math.floor(ll[0]/cell)+","+Math.floor(ll[1]/cell)]=1; } }); }); });
+  return {grid:grid,cell:cell,n:Object.keys(grid).length}; }
+function gridHit(gi,lon,lat){ var c=gi.cell,gx=Math.floor(lon/c),gy=Math.floor(lat/c);
+  for(var dx=-TERR_D;dx<=TERR_D;dx++)for(var dy=-TERR_D;dy<=TERR_D;dy++){ if(gi.grid[(gx+dx)+","+(gy+dy)]) return true; } return false; }
+// CLIP: HIFLD service-territory polygon (preferred, ComEd-style) -> else capacity-network grid -> else show all.
+function inTerritory(lon,lat){
+  if(territoryMask){ try{ return geometryEngine.contains(territoryMask,new Point({longitude:lon,latitude:lat})); }catch(e){} }
+  if(territoryGrid && territoryGrid.n>10) return gridHit(territoryGrid,lon,lat);
+  return true;
+}
+// Render the footprint as two shaded regions (VA blue / NC green) using COARSE cells so the
+// polygon stays small (a fine-cell polygon has tens of thousands of rings -> tessellator OOM).
+var DISP_CELL=0.08;   // ~5–6 mi display cells (clip stays on the fine grid)
+function buildTerritoryDisplay(){
+  if(!territoryGrid) return;
+  var fine=territoryGrid.cell, DC=DISP_CELL, occ={};
+  // coarsen the fine occupied cells to DISP_CELL
+  Object.keys(territoryGrid.grid).forEach(function(k){ var s=k.split(","), lon=(+s[0])*fine+fine/2, lat=(+s[1])*fine+fine/2;
+    occ[Math.floor(lon/DC)+","+Math.floor(lat/DC)]=1; });
+  var dil={}; Object.keys(occ).forEach(function(k){ var s=k.split(","),gx=+s[0],gy=+s[1];
+    for(var dx=-1;dx<=1;dx++)for(var dy=-1;dy<=1;dy++){ dil[(gx+dx)+","+(gy+dy)]=1; } });
+  var cells=Object.keys(dil);
+  territoryLyr.removeAll();
+  if(cells.length>6000) return;   // safety: skip rendering if somehow huge (clip still works)
+  var vaR=[], ncR=[];
+  cells.forEach(function(k){ var s=k.split(","),gx=+s[0],gy=+s[1];
+    var x0=gx*DC,y0=gy*DC,x1=x0+DC,y1=y0+DC,cy=y0+DC/2;
+    (cy>=VA_NC_LAT?vaR:ncR).push([[x0,y0],[x1,y0],[x1,y1],[x0,y1],[x0,y0]]); });
+  function addFill(rings,col){ if(rings.length) territoryLyr.add(new Graphic({
+    geometry:new Polygon({rings:rings,spatialReference:{wkid:4326}}),
+    symbol:{type:"simple-fill",color:[col[0],col[1],col[2],0.14],outline:{width:0}} })); }
+  addFill(vaR,[61,123,217]); addFill(ncR,[26,150,65]);
+  territoryMask=null;   // don't keep a heavy polygon around; school display filter is skipped (loaded sites use the grid)
+}
+// self-test against major Dominion-served cities — if the grid can't place them, it's broken
+// (e.g. wrong SR); disable clip so the tool shows everything rather than zeroing out.
+var TERR_TEST_CITIES=[[-77.43,37.54],[-76.29,36.85],[-77.05,38.88],[-75.98,36.73],[-78.48,38.03],[-76.40,37.00]]; // RIC,NOR,Arlington,VaBeach,Cville,Newport News
+function territorySelfTest(){ if(!territoryGrid) return;
+  var pass=TERR_TEST_CITIES.filter(function(p){ return gridHit(territoryGrid,p[0],p[1]); }).length;
+  if(pass<2) territoryGrid=null; }
+// ComEd-style: pull Dominion's actual retail service-territory polygon from HIFLD (runs in the browser).
+function loadHifldTerritory(){
+  var url="https://services1.arcgis.com/Hp6G80Pky0om7QvQ/arcgis/rest/services/Retail_Service_Territories/FeatureServer/0";
+  try{ var lyr=new FeatureLayer({url:url}); }catch(e){ return Promise.resolve(null); }
+  return lyr.load().then(function(){
+    return lyr.queryFeatures({ where:"NAME LIKE '%VIRGINIA ELECTRIC%' OR NAME LIKE '%DOMINION%'",
+      outFields:["NAME"], returnGeometry:true, outSR:{wkid:4326}, maxAllowableOffset:0.004 });
+  }).then(function(r){
+    if(!r||!r.features||!r.features.length) return null;
+    var geoms=r.features.map(function(f){return f.geometry;}).filter(Boolean);
+    if(!geoms.length) return null;
+    return geoms.length>1?geometryEngine.union(geoms):geoms[0];
+  }).catch(function(){ return null; });
+}
+function drawHifldTerritory(poly){
+  territoryLyr.removeAll();
+  try{ var e=poly.extent;
+    var vaRect={type:"extent",xmin:e.xmin,ymin:VA_NC_LAT,xmax:e.xmax,ymax:e.ymax,spatialReference:{wkid:4326}};
+    var ncRect={type:"extent",xmin:e.xmin,ymin:e.ymin,xmax:e.xmax,ymax:VA_NC_LAT,spatialReference:{wkid:4326}};
+    var va=geometryEngine.intersect(poly,vaRect), nc=geometryEngine.intersect(poly,ncRect);
+    if(va) territoryLyr.add(new Graphic({geometry:va,symbol:{type:"simple-fill",color:[61,123,217,0.12],outline:{color:[27,42,74,0.6],width:1}}}));
+    if(nc) territoryLyr.add(new Graphic({geometry:nc,symbol:{type:"simple-fill",color:[26,150,65,0.12],outline:{color:[27,42,74,0.6],width:1}}}));
+    if(va||nc) return;
+  }catch(e){}
+  territoryLyr.add(new Graphic({geometry:poly,symbol:{type:"simple-fill",color:[61,123,217,0.12],outline:{color:[27,42,74,0.7],width:1.2}}}));
+}
+// PRIMARY: compute the boundary IN-BROWSER from the COMPLETE live network (no fetch truncation),
+// so every feeder is enclosed. Same close+dissolve as the offline build, ported to JS.
+function computeTerritory(){
+  return Promise.all([getGenFeats(),getLoadFeats()]).then(function(r){
+    var CELL=0.05, occ={};
+    [r[0],r[1]].forEach(function(feats){ (feats||[]).forEach(function(f){ var g=f&&f.geometry; if(!g||!g.paths) return;
+      g.paths.forEach(function(p){ for(var i=0;i<p.length;i++){ var ll=toLL(p[i][0],p[i][1]);
+        occ[Math.floor(ll[0]/CELL)+","+Math.floor(ll[1]/CELL)]=1; } }); }); });
+    if(Object.keys(occ).length<20) return false;
+    function K(x,y){return x+","+y;}
+    function dilate(set,rad){ var o={}; Object.keys(set).forEach(function(k){ var s=k.split(","),x=+s[0],y=+s[1];
+      for(var dx=-rad;dx<=rad;dx++)for(var dy=-rad;dy<=rad;dy++) o[K(x+dx,y+dy)]=1; }); return o; }
+    function erode(set,rad){ var o={}; Object.keys(set).forEach(function(k){ var s=k.split(","),x=+s[0],y=+s[1],ok=true;
+      for(var dx=-rad;dx<=rad&&ok;dx++)for(var dy=-rad;dy<=rad&&ok;dy++){ if(!set[K(x+dx,y+dy)]) ok=false; }
+      if(ok) o[k]=1; }); return o; }
+    var closed=erode(dilate(occ,2),1), uni={};
+    Object.keys(occ).forEach(function(k){uni[k]=1;}); Object.keys(closed).forEach(function(k){uni[k]=1;});
+    var dil=dilate(uni,1), VA={}, NC={};
+    Object.keys(dil).forEach(function(k){ var gy=+k.split(",")[1]; ((gy*CELL+CELL/2)>=VA_NC_LAT?VA:NC)[k]=1; });
+    function outerRings(cellset){
+      var has=function(x,y){return !!cellset[K(x,y)];}, segs=[];
+      Object.keys(cellset).forEach(function(k){ var s=k.split(","),x=+s[0],y=+s[1];
+        if(!has(x,y-1)) segs.push([[x,y],[x+1,y]]);
+        if(!has(x+1,y)) segs.push([[x+1,y],[x+1,y+1]]);
+        if(!has(x,y+1)) segs.push([[x+1,y+1],[x,y+1]]);
+        if(!has(x-1,y)) segs.push([[x,y+1],[x,y]]); });
+      var av={}; segs.forEach(function(sg,i){ var a=K(sg[0][0],sg[0][1]); (av[a]||(av[a]=[])).push([sg[1],i]); });
+      var used={}, rings=[];
+      segs.forEach(function(sg,i){ if(used[i]) return; used[i]=1; var ring=[sg[0],sg[1]], cur=sg[1], st=sg[0], guard=0;
+        while((cur[0]!==st[0]||cur[1]!==st[1]) && guard<8*segs.length+10){ guard++;
+          var lst=av[K(cur[0],cur[1])], nx=null;
+          if(lst) for(var j=0;j<lst.length;j++){ if(!used[lst[j][1]]){ nx=lst[j]; break; } }
+          if(!nx) break; used[nx[1]]=1; cur=nx[0]; ring.push(cur); }
+        rings.push(ring); });
+      var out=[];
+      rings.forEach(function(rr){ if(rr.length<4) return; var sm=[rr[0]];
+        for(var k2=1;k2<rr.length-1;k2++){ var a=sm[sm.length-1],b=rr[k2],c=rr[k2+1];
+          if((b[0]-a[0])*(c[1]-a[1])===(b[1]-a[1])*(c[0]-a[0])) continue; sm.push(b); }
+        sm.push(rr[rr.length-1]);
+        if(sm[0][0]!==sm[sm.length-1][0]||sm[0][1]!==sm[sm.length-1][1]) sm.push(sm[0]);
+        var ll=sm.map(function(pt){return [Math.round(pt[0]*CELL*1e4)/1e4, Math.round(pt[1]*CELL*1e4)/1e4];});
+        var area=0; for(var z=0;z<ll.length-1;z++){ area+=ll[z][0]*ll[z+1][1]-ll[z+1][0]*ll[z][1]; }
+        if(area>0) out.push(ll);   // outer rings only (holes negligible)
+      });
+      return out;
+    }
+    var vaRings=outerRings(VA), ncRings=outerRings(NC);
+    if(!vaRings.length && !ncRings.length) return false;
+    territoryLyr.removeAll(); var allRings=[];
+    function addFill(rings,col){ rings.forEach(function(rg){allRings.push(rg);});
+      if(rings.length) territoryLyr.add(new Graphic({geometry:new Polygon({rings:rings,spatialReference:{wkid:4326}}),
+        symbol:{type:"simple-fill",color:[col[0],col[1],col[2],0.10],outline:{color:[col[0],col[1],col[2],0.9],width:1.6}}})); }
+    addFill(vaRings,[61,123,217]); addFill(ncRings,[26,150,65]);
+    territoryMask=new Polygon({rings:allRings,spatialReference:{wkid:4326}}); territoryGrid=null;
+    territorySource="computed from full live network"; return true;
+  }).catch(function(){ return false; });
+}
+// FALLBACK: the baked Dominion service-territory polygon (dominion_territory.js).
+function applyBakedTerritory(){
+  var T=window.DOMINION_TERRITORY;
+  if(!T||!T.features||!T.features.length) return false;
+  try{
+    var allRings=[]; territoryLyr.removeAll();
+    T.features.forEach(function(f){
+      var col=(f.properties&&f.properties.STATE==="NC")?[26,150,65]:[61,123,217], rings=[];
+      (f.geometry.coordinates||[]).forEach(function(poly){ if(poly&&poly[0]){ rings.push(poly[0]); allRings.push(poly[0]); } });
+      if(rings.length) territoryLyr.add(new Graphic({geometry:new Polygon({rings:rings,spatialReference:{wkid:4326}}),
+        symbol:{type:"simple-fill",color:[col[0],col[1],col[2],0.10],outline:{color:[col[0],col[1],col[2],0.9],width:1.6}}}));
+    });
+    if(!allRings.length) return false;
+    territoryMask=new Polygon({rings:allRings,spatialReference:{wkid:4326}}); territoryGrid=null;
+    territorySource="Dominion service-territory polygon (baked)"; return true;
+  }catch(e){ return false; }
+}
+function buildTerritory(){
+  // baked Dominion service-territory polygon first (reliable, instant). Fallbacks: HIFLD, then capacity-network grid.
+  if(applyBakedTerritory()) return Promise.resolve(territoryMask);
+  return loadHifldTerritory().then(function(poly){
+    if(poly){ territoryMask=poly; territoryGrid=null; territorySource="HIFLD service-territory polygon"; drawHifldTerritory(poly); return; }
+    return Promise.all([getGenFeats(),getLoadFeats()]).then(function(r){
+      try{ territoryGrid=buildVertexGrid([r[0],r[1]]); }catch(e){ territoryGrid=null; }
+      territorySelfTest();
+      if(territoryGrid){ try{ buildTerritoryDisplay(); }catch(e){} }
+      territorySource = territoryGrid ? "capacity-network footprint (HIFLD unavailable)" : "none (clipping disabled)";
+    });
+  });
+}
+// School DISPLAY layer: clip with the footprint polygon only when it's light enough (few rings) to avoid
+// freezing the browser; the loaded school SITES and substations are always clipped via inTerritory().
+function applyTerritoryFilters(){
+  if(!territoryMask) return;   // HIFLD polygon: filter the school display layer to the territory
+  try{ var ff=new FeatureFilter({geometry:territoryMask,spatialRelationship:"intersects"});
+    view.whenLayerView(schoolLayer).then(function(lv){ try{ lv.filter=ff; }catch(e){} }).catch(function(){}); }catch(e){}
+}
+
+/* ===== Both-mode combined layer: each load segment colored by avg(gen,load) ===== */
+var combinedLayer=null, combinedPromise=null;
+var COMBINED_BREAKS=[1,3,6,10];
+function combinedRenderer(){
+  var breaks=COMBINED_BREAKS, cols=capRamp(breaks.length), infos=[], prev=CAP_FLOOR;
+  for(var i=0;i<breaks.length;i++){ infos.push({minValue:prev,maxValue:breaks[i],
+    symbol:{type:"simple-line",color:cols[i],width:3.4},
+    label:(i===0?"≤":fmtMW(prev)+"–")+fmtMW(breaks[i])+" MW"}); prev=breaks[i]; }
+  infos.push({minValue:prev,maxValue:99999,symbol:{type:"simple-line",color:cols[breaks.length],width:4},label:">"+fmtMW(prev)+" MW"});
+  return {type:"class-breaks",field:"avg",defaultSymbol:{type:"simple-line",color:[120,120,120],width:1},classBreakInfos:infos,visualVariables:[lineSizeVV()]};
+}
+function buildGenGrid(feats){ var grid={},cell=0.02,vf=capLayers.gen._cfg.valueField;
+  feats.forEach(function(f){ var g=f.geometry,mw=f.attributes[vf]; if(!g||!g.paths) return;
+    g.paths.forEach(function(p){ for(var i=0;i<p.length;i++){ var k=Math.floor(p[i][0]/cell)+","+Math.floor(p[i][1]/cell);
+      (grid[k]||(grid[k]=[])).push([p[i][0],p[i][1],mw]); } }); });
+  return {grid:grid,cell:cell}; }
+function nearestGenMW(gi,lon,lat){ var c=gi.cell,gx=Math.floor(lon/c),gy=Math.floor(lat/c),best=null,bd=1e9;
+  for(var dx=-2;dx<=2;dx++)for(var dy=-2;dy<=2;dy++){ var a=gi.grid[(gx+dx)+","+(gy+dy)]; if(!a)continue;
+    for(var i=0;i<a.length;i++){ var d=(a[i][0]-lon)*(a[i][0]-lon)+(a[i][1]-lat)*(a[i][1]-lat); if(d<bd){bd=d;best=a[i][2];} } }
+  return best; }
+function midOf(geom){ if(!geom||!geom.paths||!geom.paths.length) return null; var p=geom.paths[0]; var m=p[Math.floor(p.length/2)]; return m?{lon:m[0],lat:m[1]}:null; }
+function ensureCombined(){
+  if(combinedPromise) return combinedPromise;
+  status("Building combined gen+load average layer…");
+  var lcfg=capLayers.load._cfg;
+  combinedPromise=Promise.all([ getGenFeats(), getLoadFeats() ]).then(function(r){
+    var gi=buildGenGrid(r[0]), loadFeats=r[1];
+    var graphics=loadFeats.map(function(f,idx){ var mid=midOf(f.geometry), load=f.attributes[lcfg.valueField];
+      var gen=mid?nearestGenMW(gi,mid.lon,mid.lat):null;
+      var avg=(gen!=null)?(gen+load)/2:load;
+      return new Graphic({geometry:f.geometry,
+        attributes:{OBJECTID:idx+1, avg:avg, gen:(gen!=null?gen:-1), load:load, volt:f.attributes[lcfg.voltField]}}); });
+    combinedLayer=new FeatureLayer({ source:graphics, objectIdField:"OBJECTID", geometryType:"polyline",
+      spatialReference:{wkid:4326}, title:"Combined (avg gen+load MW)", popupEnabled:false, opacity:0.9,
+      fields:[{name:"OBJECTID",type:"oid"},{name:"avg",type:"double"},{name:"gen",type:"double"},{name:"load",type:"double"},{name:"volt",type:"integer"}],
+      renderer:combinedRenderer() });
+    map.add(combinedLayer,1);
+    bringToTop([subLayer,glowLyr,selLyr,siteLyr,centerLyr]);
+    if(territoryMask) applyTerritoryFilters();
+    status("");
+    return combinedLayer;
+  }).catch(function(e){ status("Combined build error: "+e.message); combinedPromise=null; });
+  return combinedPromise;
+}
+
+/* ---------------- UI: tabs ---------------- */
+document.querySelectorAll("#tabs button").forEach(function(b){
+  b.onclick=function(){
+    document.querySelectorAll("#tabs button").forEach(function(x){x.classList.remove("on");});
+    b.classList.add("on");
+    document.querySelectorAll(".panel").forEach(function(p){p.classList.remove("on");});
+    document.getElementById("p-"+b.dataset.tab).classList.add("on");
+  };
+});
+
+/* ---------------- mode selector ---------------- */
+var mode=TERRITORY.defaultMode;
+function applyMode(){
+  document.querySelectorAll("#modeSeg button").forEach(function(b){ b.classList.toggle("on",b.dataset.mode===mode); });
+  if(mode==="both"){
+    // quick view: overlay gen+load immediately, then swap to averaged combined layer when built
+    capLayers.gen.visible=true; capLayers.load.visible=true;
+    if(combinedLayer) combinedLayer.visible=false;
+    ensureCombined().then(function(){ if(mode==="both" && combinedLayer){
+      combinedLayer.visible=true; capLayers.gen.visible=false; capLayers.load.visible=false; } });
+  } else {
+    if(combinedLayer) combinedLayer.visible=false;
+    capLayers.gen.visible=(mode==="gen");
+    capLayers.load.visible=(mode==="load");
+  }
+  buildCapLegend();
+  if(typeof findActive!=="undefined" && findActive) setFindFade(true);
+}
+document.querySelectorAll("#modeSeg button").forEach(function(b){
+  b.onclick=function(){ mode=b.dataset.mode; applyMode(); };
+});
+
+/* ---------------- legends ---------------- */
+function buildCapLegend(){
+  var host=document.getElementById("legendCap"); host.innerHTML="";
+  if(mode==="both"){
+    var head=document.createElement("div"); head.className="muted"; head.style.fontWeight="700";
+    head.style.margin="6px 0 2px"; head.textContent="Average available — (gen + load) ÷ 2"; host.appendChild(head);
+    var cols=capRamp(COMBINED_BREAKS.length), prev=-1;
+    COMBINED_BREAKS.forEach(function(b,i){ addLegendRow(host,cols[i],(i===0?"≤":fmtMW(prev)+"–")+fmtMW(b)+" MW"); prev=b; });
+    addLegendRow(host,cols[COMBINED_BREAKS.length],">"+fmtMW(prev)+" MW");
+    return;
+  }
+  TERRITORY.capacity.forEach(function(cfg){
+    if(mode!==cfg.role) return;
+    var cols=capRamp(cfg.breaksMW.length);
+    var head=document.createElement("div"); head.className="muted"; head.style.fontWeight="700";
+    head.style.margin="6px 0 2px"; head.textContent=cfg.label; host.appendChild(head);
+    var prev=-1;
+    cfg.breaksMW.forEach(function(b,i){
+      addLegendRow(host,cols[i],(i===0?"≤":fmtMW(prev)+"–")+fmtMW(b)+" MW"); prev=b; });
+    addLegendRow(host,cols[cfg.breaksMW.length],">"+fmtMW(prev)+" MW");
+  });
+}
+function addLegendRow(host,color,label){
+  var row=document.createElement("div"); row.className="legend-row";
+  var sw=document.createElement("span"); sw.className="swatch"; sw.style.background=color;
+  var tx=document.createElement("span"); tx.textContent=label;
+  row.appendChild(sw); row.appendChild(tx); host.appendChild(row);
+}
+var subClassCounts={}, subTotal=0;
+function buildSubLegend(){
+  var host=document.getElementById("legendSub"); host.innerHTML="";
+  var sel=document.getElementById("subClass"), selCls=sel?sel.value:"all";
+  var nm={ehv:"Transmission-EHV",trans:"Transmission",subt:"Sub-transmission",dist:"Distribution"};
+  var selName=nm[selCls]||null;   // null = All
+  Object.keys(SUB_COLORS).forEach(function(k){
+    var c=SUB_COLORS[k], n=subClassCounts[k]||0;
+    if(subTotal>0 && n===0 && k!=="Undetermined") return;   // hide empty classes once loaded
+    var dim=(selName && selName!==k);                        // dim classes hidden by the dropdown
+    var label=k+(subTotal>0?(" ("+n.toLocaleString()+")"):"");
+    var row=document.createElement("div"); row.className="legend-row"; if(dim) row.style.opacity="0.35";
+    row.innerHTML="<span class='swatch' style='background:rgb("+c[0]+","+c[1]+","+c[2]+")'></span><span>"+label+"</span>";
+    host.appendChild(row);
+  });
+  if(subTotal>0){ var t=document.createElement("div"); t.className="muted small"; t.style.marginTop="2px";
+    t.textContent=(selName?(subClassCounts[selName]||0)+" of ":"")+subTotal.toLocaleString()+" substations in territory"; host.appendChild(t); }
+}
+buildSubLegend(); applyMode();
+
+/* ---------------- substation filters ---------------- */
+function subFilter(){
+  if(!subLayer) return;
+  var parts=(subBaseWhere&&subBaseWhere!=="1=1")?[subBaseWhere]:[];
+  var cls=document.getElementById("subClass").value;
+  var kvF=SUBF.kv, clsF=SUBF.classField;
+  if(cls!=="all"){
+    if(clsF){ var nm={ehv:"Transmission-EHV",trans:"Transmission",subt:"Sub-transmission",dist:"Distribution"};
+      parts.push(clsF+"='"+nm[cls]+"'"); }
+    else if(cls==="ehv") parts.push(kvF+">=230");
+    else if(cls==="trans") parts.push(kvF+">=115 AND "+kvF+"<230");
+    else if(cls==="subt") parts.push(kvF+">=69 AND "+kvF+"<115");
+    else if(cls==="dist") parts.push(kvF+">0 AND "+kvF+"<69");
+  }
+  var kv=+document.getElementById("subKv").value;
+  // min-voltage filter only hides VOLTAGE-TAGGED subs below the threshold;
+  // no-voltage subs (e.g. OSM distribution) stay visible so we can still see where they are.
+  if(kv>0) parts.push("("+kvF+">="+kv+" OR "+kvF+"<=0)");
+  subLayer.definitionExpression=parts.length?parts.join(" AND "):"1=1";
+}
+document.getElementById("subOn").onchange=function(){ if(subLayer) subLayer.visible=this.checked; };
+document.getElementById("terrOn").onchange=function(){ territoryLyr.visible=this.checked; };
+document.getElementById("txOn").onchange=function(){ if(transmissionLayer) transmissionLayer.visible=this.checked; };
+document.getElementById("txClass").onchange=txFilter;
+document.getElementById("subClass").onchange=function(){ subFilter(); buildSubLegend(); };
+document.getElementById("subKv").oninput=function(){ document.getElementById("kvLbl").textContent=this.value; subFilter(); };
+document.getElementById("subExportBtn").onclick=function(){
+  if(!subLayer){ status("Substations not loaded yet"); return; }
+  subLayer.queryFeatures({where:subLayer.definitionExpression||"1=1",outFields:["*"],returnGeometry:true,outSpatialReference:{wkid:4326},num:20000})
+    .then(function(r){
+      if(!r.features.length){ status("No substations match the current filter"); return; }
+      var rows=r.features.map(function(f){ var a=f.attributes,g=f.geometry; return {
+        name:a.name||"", classification:a["class"]||"", max_kv:a.maxkv>0?a.maxkv:"", min_kv:a.minkv>0?a.minkv:"",
+        county:a.county||"", state:a.state||"", status:a.status||"", type:a.stype||"",
+        lat:g?round2(g.latitude):"", lon:g?round2(g.longitude):"" }; });
+      if(exportXlsx(["name","classification","max_kv","min_kv","county","state","status","type","lat","lon"],rows,"Substations","dominion_substations_export.xlsx")) status("Exported "+rows.length+" substations to Excel");
+    });
+};
+document.getElementById("schoolOn").onchange=function(){ schoolLayer.visible=this.checked; };
+
+/* ---------------- FIND ---------------- */
+var findActive=false, findCriteria=null;
+function readFind(){
+  return {
+    gen:+document.getElementById("genMin").value||0,
+    load:+document.getElementById("loadMin").value||0,
+    voltKv:+document.getElementById("voltMin").value||0,
+    useCenter:document.getElementById("useCenter").checked,
+    cLon:+document.getElementById("ctrLon").value, cLat:+document.getElementById("ctrLat").value,
+    cRad:+document.getElementById("ctrRad").value||10,
+    elig:+document.getElementById("eligDist").value||1,
+    subRad:+document.getElementById("subRad").value||3,
+    subElig:+document.getElementById("subElig").value||0,        // 0 = not required
+    txElig:+document.getElementById("txElig").value||0,          // 0 = not required
+    txEligClass:document.getElementById("txEligClass").value||"all"
+  };
+}
+function capWhere(cfg,minMW,voltKv){
+  var w=cfg.valueField+">="+minMW;
+  if(voltKv>0) w+=" AND "+cfg.voltField+">="+(voltKv*1000);
+  return w;
+}
+function midpoint(geom){ // polyline midpoint (longest path mid vertex) in lon/lat
+  if(!geom||!geom.paths||!geom.paths.length) return null;
+  var path=geom.paths[0], idx=Math.floor(path.length/2);
+  var pt=path[idx], ll=toLL(pt[0],pt[1]);   // normalize to lon/lat (handles Web Mercator)
+  return {lon:ll[0],lat:ll[1]};
+}
+function queryCap(cfg,minMW,c){
+  var q={ where:capWhere(cfg,minMW,c.voltKv), outFields:[cfg.valueField,cfg.voltField], returnGeometry:true, outSpatialReference:{wkid:4326}, num:1500 };
+  if(c.useCenter && !isNaN(c.cLon) && !isNaN(c.cLat)){
+    q.geometry=new Circle({center:[c.cLon,c.cLat],radius:c.cRad,radiusUnit:"miles"});
+    q.spatialRelationship="intersects";
+  }
+  return capLayers[cfg.role].queryFeatures(q);
+}
+// Fade the (non-matching) base capacity network when a Find is active, so the
+// glowing matched feeders stand out — exactly the ComEd/Ameren treatment.
+function setFindFade(on){
+  var op=on?0.13:0.9;
+  if(capLayers.gen) capLayers.gen.opacity=op;
+  if(capLayers.load) capLayers.load.opacity=op;
+  if(combinedLayer) combinedLayer.opacity=op;
+}
+function runFind(){
+  var c=readFind(); findCriteria=c; findActive=(c.gen>0||c.load>0||c.useCenter||c.voltKv>0||c.subElig>0||c.txElig>0);
+  glowLyr.removeAll(); selLyr.removeAll();
+  ensureCapCache(); // background preload → subsequent site analysis is instant
+  var jobs=[];
+  TERRITORY.capacity.forEach(function(cfg){
+    var minMW=(cfg.role==="gen")?c.gen:c.load;
+    if(mode!=="both" && mode!==cfg.role) return;
+    jobs.push(queryCap(cfg,minMW,c).then(function(r){ return {cfg:cfg,feats:r.features}; }));
+  });
+  status("Running Find…");
+  Promise.all(jobs).then(function(sets){
+    var totals={gen:0,load:0,n:0};
+    sets.forEach(function(s){
+      s.feats.forEach(function(f){
+        var v=f.attributes[s.cfg.valueField];
+        totals.n++; totals[s.cfg.role]+=v;
+        if(findActive && f.geometry){
+          var rgb=capColorRGB(s.cfg.role,v);
+          // tight highlight: a single bright stroke just over the feeder (no wide halo)
+          glowLyr.add(new Graphic({geometry:f.geometry,symbol:{type:"simple-line",color:rgb.concat([1]),width:4,cap:"round",join:"round"}}));
+        }
+      });
+    });
+    bringToTop([subLayer,glowLyr,selLyr,siteLyr,centerLyr]);
+    setFindFade(findActive);
+    renderFindSummary(totals,c);
+    status("");
+    analyzeAllSites(c);   // one action: Run Find also scores every loaded site
+  }).catch(function(e){ status("Find error: "+e.message); });
+}
+// Analyze every loaded site against the current Find parameters (batched).
+function analyzeAllSites(c){
+  if(!sites.length) return;
+  var i=0, batch=6;
+  status("Analyzing "+sites.length+" sites…");
+  (function next(){
+    if(i>=sites.length){ sites.sort(cmpSites); drawSites(); renderSites();
+      status("Analyzed "+sites.length+" sites"); setTimeout(function(){status("");},2500); return; }
+    var chunk=sites.slice(i,i+batch); i+=batch;
+    Promise.all(chunk.map(function(s){return analyzeSite(s,c);})).then(function(){ if(i%60<batch) renderSites();
+      status("Analyzed "+Math.min(i,sites.length)+"/"+sites.length); next(); })
+      .catch(function(e){ status("Analyze error: "+e.message); next(); });
+  })();
+}
+function renderFindSummary(totals,c){
+  var sum=document.getElementById("findSum");
+  var note=findActive
+    ? "Matching feeders are highlighted on the map; the rest of the network is dimmed. The source has no feeder&nbsp;ID, so segments can't be de&#8209;duplicated into named feeders — switch to <b>Sites</b> to score candidate parcels against these parameters."
+    : "Set a minimum gen/load (or a radius) to highlight matching feeders.";
+  sum.innerHTML="<div class='sum'>Σ "+totals.n+" matching segments &middot; gen "+fmtMW(totals.gen)+" MW &middot; load "+fmtMW(totals.load)+" MW"+
+    "<div class='hint' style='margin-top:6px'>"+note+"</div></div>";
+  document.getElementById("findRes").innerHTML="";
+}
+document.getElementById("runFind").onclick=runFind;
+document.getElementById("clearFind").onclick=function(){
+  findActive=false; findCriteria=null; glowLyr.removeAll(); selLyr.removeAll();
+  setFindFade(false);
+  document.getElementById("findRes").innerHTML=""; document.getElementById("findSum").innerHTML="";
+};
+
+/* ---------------- click-to-glow on capacity (filter-aware) ---------------- */
+view.on("click",function(ev){
+  if(window.__capMode){ var gpc=webMercatorUtils.webMercatorToGeographic(ev.mapPoint); logCapture(gpc.x,gpc.y); return; }
+  if(document.getElementById("clickCapture") && document.getElementById("clickCapture").checked
+     && document.querySelector("#tabs button[data-tab=foot]").classList.contains("on")){
+    var gp=webMercatorUtils.webMercatorToGeographic(ev.mapPoint);
+    captureSite(gp.x,gp.y); return;
+  }
+  view.hitTest(ev).then(function(res){
+    var hit=res.results.filter(function(r){return r.graphic&&r.graphic.layer&&(r.graphic.layer===capLayers.gen||r.graphic.layer===capLayers.load||r.graphic.layer===combinedLayer||r.graphic.layer===subLayer||r.graphic.layer===schoolLayer||r.graphic.layer===siteLyr||r.graphic.layer===transmissionLayer);})[0];
+    if(!hit) return;
+    var lyr=hit.graphic.layer;
+    if(lyr===transmissionLayer){ view.popup.open({features:[hit.graphic],location:ev.mapPoint}); return; }
+    if(lyr===siteLyr){ var s=findSite(hit.graphic.attributes.id); if(s) openSitePopup(s,ev.mapPoint); return; }
+    if(lyr===subLayer){ view.popup.open({features:[hit.graphic],location:ev.mapPoint}); return; }
+    if(lyr===schoolLayer){ var a=hit.graphic.attributes, g=hit.graphic.geometry;
+      openSitePopup({ id:"sch"+(a.NCESSCH||""), name:a.NAME||"School",
+        lon:(a.LON!=null?a.LON:g.longitude), lat:(a.LAT!=null?a.LAT:g.latitude),
+        extra:{nces_id:a.NCESSCH,address:a.STREET,city:a.CITY,state:a.STATE,county:a.NMCNTY} }, ev.mapPoint);
+      return; }
+    // capacity line (gen / load / combined) -> Illinois-style Gen + Load table at this location
+    var gp=webMercatorUtils.webMercatorToGeographic(ev.mapPoint);
+    selLyr.removeAll();   // reset previous selection so only the clicked segment glows
+    selLyr.add(new Graphic({geometry:hit.graphic.geometry, symbol:{type:"simple-line",color:[255,215,0],width:6}}));
+    // popup shows only what the active layer markets: gen mode → generation, load mode → load, both → both + average
+    var showGen=(mode!=="load"), showLoad=(mode!=="gen"), showAvg=(mode==="both");
+    var capTitle=(mode==="gen")?"PV / generation capacity here":(mode==="load")?"EV / load capacity here":"Hosting capacity at this location";
+    view.popup.open({location:ev.mapPoint, title:capTitle, content:"<div class='small'>Querying capacity…</div>"});
+    Promise.all([capAtPoint("gen",gp.x,gp.y), capAtPoint("load",gp.x,gp.y)]).then(function(r){
+      var g=r[0], l=r[1];
+      var genMW=g?g.mw:null, loadMW=l?l.mw:null;
+      var volt=showGen?((g&&g.volt)||(l&&l.volt)):((l&&l.volt)||(g&&g.volt));
+      var avg=(genMW!=null&&loadMW!=null)?(genMW+loadMW)/2:(genMW!=null?genMW:loadMW);
+      var fc=findCriteria||{gen:0,load:0};
+      var genOk=(genMW!=null&&genMW>=(fc.gen||0)), loadOk=(loadMW!=null&&loadMW>=(fc.load||0));
+      var html="<div class='fp'><table class='fp'>";
+      if(showGen) html+="<tr><td><b>PV / Gen (+BESS)</b></td><td style='text-align:right'><b>"+(genMW!=null?fmtMW(genMW)+" MW":"– none nearby")+"</b></td></tr>";
+      if(showLoad) html+="<tr><td><b>EV / Load</b></td><td style='text-align:right'><b>"+(loadMW!=null?fmtMW(loadMW)+" MW":"– none nearby")+"</b></td></tr>";
+      if(showAvg) html+="<tr><td>Average (gen+load)/2</td><td style='text-align:right'>"+(avg!=null?fmtMW(avg)+" MW":"–")+"</td></tr>";
+      html+="<tr><td>Operating voltage</td><td style='text-align:right'>"+(kvOf(volt)||"?")+" kV</td></tr>";
+      if(findActive){ var fp=[]; if(showGen) fp.push("gen "+(genOk?"✓":"<span style=\"color:#d7191c\">✗</span>")); if(showLoad) fp.push("load "+(loadOk?"✓":"<span style=\"color:#d7191c\">✗</span>"));
+        html+="<tr><td>Meets filter</td><td style='text-align:right'>"+fp.join(" · ")+"</td></tr>"; }
+      html+="</table><div class='hint'>Dominion publishes available capacity (MW) per line segment — there is no feeder&nbsp;ID or DER&#8209;queue field in the source data"+(showGen&&showLoad?", so gen &amp; load are matched here by location":"")+".</div></div>";
+      view.popup.open({location:ev.mapPoint, title:capTitle, content:html});
+    });
+  });
+});
+// nearest gen/load value at a clicked location (within ~0.2 mi) — cache-first (instant)
+function capAtPoint(role,lon,lat){
+  var pt=new Point({longitude:lon,latitude:lat});
+  if(capCache&&capCache[role]){
+    var res=scanIndex(capCache[role],lon,lat,0.2), best=null, bd=1e9;
+    res.list.forEach(function(e){ if(e.dist<bd){ bd=e.dist; best={mw:e.mw,volt:e.volt}; } });
+    return Promise.resolve(best);  // volt is the raw coded value; the click handler applies kvOf()
+  }
+  var cfg=capLayers[role]._cfg;
+  return capLayers[role].queryFeatures({ geometry:new Circle({center:[lon,lat],radius:0.15,radiusUnit:"miles"}),
+    spatialRelationship:"intersects", outFields:[cfg.valueField,cfg.voltField], returnGeometry:true, outSpatialReference:{wkid:4326}, num:50 })
+   .then(function(r){ var best=null,bd=1e9;
+     r.features.forEach(function(f){ var nc=geometryEngine.nearestCoordinate(f.geometry,pt);
+       var d=(nc&&nc.coordinate)?haversineMi(lat,lon,nc.coordinate.latitude,nc.coordinate.longitude):1e9;
+       if(d<bd){bd=d;best={mw:f.attributes[cfg.valueField],volt:f.attributes[cfg.voltField]};} });
+     return best; }).catch(function(){ return null; });
+}
+
+/* ---------------- coordinate capture log ---------------- */
+var capPts=[];
+function renderCapture(){
+  var host=document.getElementById("capList"), ex=document.getElementById("capExport");
+  if(!capPts.length){ host.textContent="No captured points yet."; ex.style.display="none"; return; }
+  host.innerHTML=capPts.slice(-8).reverse().map(function(p){ return p.time+" · "+(p.county||p.city||"—")+" · "+p.lat+", "+p.lon; }).join("<br>")
+    +(capPts.length>8?("<br><span class='muted'>(+"+(capPts.length-8)+" more — all exported)</span>"):"");
+  ex.style.display="";
+}
+function logCapture(lon,lat){
+  var rec={time:new Date().toLocaleString(), lat:Math.round(lat*1e5)/1e5, lon:Math.round(lon*1e5)/1e5, county:"", city:""};
+  capPts.push(rec); renderCapture();
+  selLyr.removeAll(); selLyr.add(new Graphic({geometry:new Point({longitude:lon,latitude:lat}),
+    symbol:{type:"simple-marker",style:"circle",size:9,color:[255,140,0,0.9],outline:{color:[255,255,255],width:1.5}}}));
+  var url="https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/reverseGeocode?f=json&outSR=4326&location="+lon+","+lat;
+  esriRequest(url,{responseType:"json"}).then(function(r){ var a=r.data&&r.data.address;
+    if(a){ rec.county=a.Subregion||""; rec.city=a.City||""; renderCapture(); } }).catch(function(){});
+}
+document.getElementById("capToggle").onclick=function(){
+  window.__capMode=!window.__capMode;
+  this.textContent="Capture: "+(window.__capMode?"on":"off");
+  status(window.__capMode?"Coordinate capture ON — click the map to log points":"");
+};
+document.getElementById("capClear").onclick=function(){ capPts=[]; renderCapture(); };
+document.getElementById("capExport").onclick=function(){
+  if(!capPts.length) return;
+  var csv=toCsv(["time","county","city","lat","lon"],capPts);
+  downloadBlob(new Blob([csv],{type:"text/csv;charset=utf-8"}),"dominion_captured_points.csv");
+  status("Exported "+capPts.length+" captured point(s)");
+};
+
+/* ---------------- SITES ---------------- */
+var sites=[]; // {id,name,lon,lat, extra:{}, score fields...}
+function siteId(){ return "s"+Date.now()+Math.floor(Math.random()*1000); }
+function addSite(lon,lat,name,extra){
+  if(isNaN(lon)||isNaN(lat)) return null;
+  var s={id:siteId(),name:name||("Site "+(sites.length+1)),lon:+lon,lat:+lat,extra:extra||{}};
+  sites.push(s); drawSites(); renderSites(); return s;
+}
+function drawSites(){
+  siteLyr.removeAll();
+  sites.forEach(function(s){
+    var col=s._color||(s.extra&&s.extra._color)||"#1b2a4a";
+    siteLyr.add(new Graphic({ geometry:new Point({longitude:s.lon,latitude:s.lat}),
+      symbol:{type:"simple-marker",style:"circle",size:12,color:col,
+        outline:{color:[255,255,255],width:1.5}},
+      attributes:{id:s.id} }));
+  });
+}
+function findSite(id){ for(var i=0;i<sites.length;i++) if(sites[i].id===id) return sites[i]; return null; }
+function removeSite(id){ sites=sites.filter(function(s){return s.id!==id;}); drawSites(); renderSites(); }
+function esc(t){ var d=document.createElement("div"); d.textContent=(t==null?"":String(t)); return d.innerHTML; }
+function round2(x){ return Math.round(x*100)/100; }
+function miLabel(d){ return d<0.095?(Math.round(d*5280)+" ft"):(round2(d)+" mi"); }
+function siteMatches(s,c){ if(!s.analyzed) return false;
+  var g=c.gen||0, l=c.load||0;
+  if(g>0||l>0){ if(!((s.gen_MW_avail>=g)&&(s.load_MW_avail>=l))) return false; }
+  if(c.subElig>0){ if(!(s.nearest_sub_dist_mi!=null && s.nearest_sub_dist_mi<=c.subElig)) return false; }
+  if(c.txElig>0){ if(!(s.nearest_tx_dist_mi!=null && s.nearest_tx_dist_mi<=c.txElig)) return false; }
+  return true; }
+
+function radRow(label,b){ return "<tr><td colspan='2' class='sub'>WITHIN "+label+"</td></tr>"+
+  "<tr><td>Feeders</td><td style='text-align:right'>"+b.feeders+"</td></tr>"+
+  "<tr><td>Sum Generation</td><td style='text-align:right'>"+fmtMW(b.sumGen)+" MW</td></tr>"+
+  "<tr><td>Sum Load</td><td style='text-align:right'>"+fmtMW(b.sumLoad)+" MW</td></tr>"; }
+function siteDetailHTML(s){
+  if(!s.analyzed) return "<div class='muted small'>Not analyzed yet — press <b>Run Find</b>.</div>";
+  var c=readFind();
+  var h="<table class='fp'>"+radRow("0.1 MI",s.r01)+radRow("0.3 MI",s.r03)+radRow("0.5 MI",s.r05);
+  h+="<tr><td colspan='2' class='sub'>QUALIFYING FEEDERS ≤ "+(c.elig||1)+" MI</td></tr>";
+  h+="<tr><td>Count</td><td style='text-align:right'>"+s.qual.count+"</td></tr>";
+  if(s.qual.nearest){ h+="<tr><td>Nearest</td><td style='text-align:right'>"+s.qual.nearest.label+" — "+miLabel(s.qual.nearest.dist)+"</td></tr>";
+    h+="<tr><td>its Gen / Load</td><td style='text-align:right'>"+fmtMW(s.qual.nearest.gen)+" / "+fmtMW(s.qual.nearest.load)+" MW</td></tr>"; }
+  h+="<tr><td colspan='2' class='sub'>SUBSTATIONS ≤ "+(c.subRad||3)+" MI</td></tr>";
+  h+="<tr><td>Count</td><td style='text-align:right'>"+(s.subs_within_radius||0)+"</td></tr>";
+  if(s.nearest_sub_name) h+="<tr><td>Nearest</td><td style='text-align:right'>"+esc(s.nearest_sub_name)+" — "+s.nearest_sub_dist_mi+" mi</td></tr>";
+  h+="<tr><td colspan='2' class='sub'>NEAREST TRANSMISSION"+(c.txEligClass&&c.txEligClass!=="all"?(" ("+(TX_META[c.txEligClass]?TX_META[c.txEligClass].label:c.txEligClass)+")"):"")+"</td></tr>";
+  h+="<tr><td>Distance</td><td style='text-align:right'>"+(s.nearest_tx_dist_mi!=null?(s.nearest_tx_dist_mi+" mi"+(s.nearest_tx_kv?" · "+s.nearest_tx_kv+" kV":"")):"– none nearby")+"</td></tr>";
+  if(s.lot_acres!=null||s.building_sqft!=null){ h+="<tr><td colspan='2' class='sub'>FOOTPRINT</td></tr>";
+    h+="<tr><td>Lot area</td><td style='text-align:right'>"+(s.lot_acres!=null?s.lot_acres+" ac":"–")+"</td></tr>";
+    h+="<tr><td>Building</td><td style='text-align:right'>"+(s.building_sqft!=null?s.building_sqft.toLocaleString()+" sqft":"–")+"</td></tr>";
+    if(s.outdoor_sqft!=null) h+="<tr><td>Outdoor</td><td style='text-align:right'>"+s.outdoor_sqft.toLocaleString()+" sqft</td></tr>"; }
+  h+="</table>";
+  return h;
+}
+function chips(title,items,labeler){
+  var wrap=document.createElement("div"); wrap.style.margin="6px 0 2px";
+  var t=document.createElement("div"); t.className="muted small"; t.textContent=title+" — click to zoom"; wrap.appendChild(t);
+  items.forEach(function(it){ var c=document.createElement("span"); c.className="chip pill";
+    c.style.cssText="cursor:pointer;margin:2px 4px 2px 0;display:inline-block;";
+    c.textContent=labeler(it);
+    c.onclick=function(ev){ ev.stopPropagation(); view.goTo({center:[it.lon,it.lat],zoom:15}); glowPoint(it.lon,it.lat); };
+    wrap.appendChild(c); });
+  return wrap;
+}
+// glowing point marker (soft halo + bright core) — replaces the old "X"
+function glowPoint(lon,lat){ selLyr.removeAll();
+  var pt=new Point({longitude:lon,latitude:lat});
+  selLyr.add(new Graphic({geometry:pt,symbol:{type:"simple-marker",style:"circle",size:34,color:[255,205,0,0.28],outline:{color:[255,205,0,0],width:0}}}));
+  selLyr.add(new Graphic({geometry:pt,symbol:{type:"simple-marker",style:"circle",size:20,color:[255,170,0,0.5],outline:{color:[255,205,0,0],width:0}}}));
+  selLyr.add(new Graphic({geometry:pt,symbol:{type:"simple-marker",style:"circle",size:11,color:[255,140,0,0.95],outline:{color:[255,255,255,0.95],width:2}}}));
+}
+function flashSite(s){ glowPoint(s.lon,s.lat); }
+// locate = zoom in + glow the point + open the site popup, all at once
+function locateSite(s){
+  view.goTo({center:[s.lon,s.lat],zoom:16});
+  glowPoint(s.lon,s.lat);
+  openSitePopup(s,new Point({longitude:s.lon,latitude:s.lat}));
+}
+function siteSummary(s){ return s.analyzed? ("best gen "+fmtMW(s.gen_MW_avail)+" / load "+fmtMW(s.load_MW_avail)+
+  " MW · qual "+s.qual.count+" · subs "+(s.subs_within_radius||0)) : ""; }
+// sort comparator driven by the Sites "Sort by" dropdown
+function sortByVal(){ var el=document.getElementById("sortBy"); return el?el.value:"gen"; }
+function cmpSites(a,b){ var by=sortByVal();
+  if(by==="name") return String(a.name||"").localeCompare(String(b.name||""));
+  if(by==="load") return (b.load_MW_avail||0)-(a.load_MW_avail||0);
+  return (b.gen_MW_avail||0)-(a.gen_MW_avail||0); }
+function siteCard(s,c,analyzed){
+  var d=document.createElement("div"); d.className="site";
+  var q=(s.dual_qualifies===true)?"<span class='q yes'>DUAL</span>":(s.dual_qualifies===false?"<span class='q no'>no</span>":"");
+  var head=document.createElement("div");
+  head.innerHTML=q+"<b>"+esc(s.name)+"</b><div class='muted'>"+s.lat.toFixed(4)+", "+s.lon.toFixed(4)+"</div>"+
+    (s.analyzed?("<div class='small'>"+siteSummary(s)+"</div>"):"");
+  d.appendChild(head);
+  var det=document.createElement("div"); det.style.display="none"; d.appendChild(det);
+  function fillDetail(){ det.innerHTML="";
+    var t=document.createElement("div"); t.innerHTML=siteDetailHTML(s); det.appendChild(t);
+    if(s.qual&&s.qual.list&&s.qual.list.length) det.appendChild(chips("Qualifying feeders ("+s.qual.count+")",s.qual.list,function(it){return it.label+" — "+miLabel(it.dist);}));
+    if(s.subList&&s.subList.length) det.appendChild(chips("Substations ("+(s.subs_within_radius||0)+")",s.subList,function(it){return esc(it.name)+" — "+round2(it.dist)+" mi";})); }
+  var loc=document.createElement("span"); loc.className="lnk"; loc.textContent="locate";
+  loc.onclick=function(ev){ ev.stopPropagation(); locateSite(s); };
+  var rm=document.createElement("span"); rm.className="x"; rm.textContent="remove";
+  rm.onclick=function(ev){ ev.stopPropagation(); removeSite(s.id); };
+  var bar=document.createElement("div"); bar.style.marginTop="6px";
+  bar.appendChild(loc); bar.appendChild(document.createTextNode("   "));
+  var hint=document.createElement("span"); hint.className="muted small"; hint.textContent="(click card for details)"; bar.appendChild(hint);
+  d.appendChild(bar); d.appendChild(rm);
+  d.style.cursor="pointer";
+  // click anywhere on the card (except the links) to expand/collapse the breakdown
+  d.onclick=function(e){ if(e.target.classList.contains("x")||e.target.classList.contains("chip")||e.target.classList.contains("lnk")) return;
+    if(det.style.display!=="none"){ det.style.display="none"; return; }
+    if(!s.analyzed){ status("Analyzing site…"); analyzeSite(s,readFind()).then(function(){ drawSites();
+      if(!head.querySelector(".small")) head.insertAdjacentHTML("beforeend","<div class='small'>"+siteSummary(s)+"</div>");
+      fillDetail(); det.style.display="block"; status(""); }); }
+    else { fillDetail(); det.style.display="block"; } };
+  return d;
+}
+function renderSites(){
+  var c=readFind();
+  document.getElementById("siteCount").textContent=sites.length;
+  var host=document.getElementById("siteList"); host.innerHTML="";
+  var anyAnalyzed=sites.some(function(s){return s.analyzed;});
+  var hdr=document.createElement("div"); hdr.className="muted small"; hdr.style.margin="2px 0 8px";
+  if(anyAnalyzed){ var m=sites.filter(function(s){return siteMatches(s,c);}).length;
+    hdr.innerHTML="<b>"+sites.length+"</b> site(s) uploaded · <b>"+m+"</b> match current Find parameters"; }
+  else hdr.innerHTML="<b>"+sites.length+"</b> site(s) — press <b>Run Find</b> for the breakdown";
+  host.appendChild(hdr);
+  var filtering=anyAnalyzed&&((c.gen>0)||(c.load>0)||(c.subElig>0)||(c.txElig>0));
+  var list=sites.slice().sort(function(a,b){ var am=siteMatches(a,c)?1:0,bm=siteMatches(b,c)?1:0;
+    if(am!==bm) return bm-am; return cmpSites(a,b); });
+  var shown=0, limit=(anyAnalyzed&&filtering)?80:200;
+  list.forEach(function(s){ if(filtering&&!siteMatches(s,c)) return; if(shown>=limit) return; shown++;
+    host.appendChild(siteCard(s,c,anyAnalyzed)); });
+  if(filtering&&shown===0){ var e=document.createElement("div"); e.className="muted small"; e.textContent="No sites match the current Find parameters."; host.appendChild(e); }
+  else if(sites.length>shown){ var mo=document.createElement("div"); mo.className="muted small"; mo.style.marginTop="6px";
+    mo.textContent="(+"+(sites.length-shown)+" more — all are analyzed & exported)"; host.appendChild(mo); }
+}
+document.getElementById("addSiteBtn").onclick=function(){
+  var s=addSite(+document.getElementById("addLon").value,+document.getElementById("addLat").value,document.getElementById("addName").value);
+  if(s) view.goTo({center:[s.lon,s.lat],zoom:14});
+};
+document.getElementById("clearSites").onclick=function(){ sites=[]; drawSites(); renderSites(); };
+document.getElementById("sortBy").onchange=function(){ renderSites(); };
+document.getElementById("addHereBtn").onclick=function(){
+  if(!navigator.geolocation){ status("Geolocation not supported by this browser"); return; }
+  status("Getting your location…");
+  navigator.geolocation.getCurrentPosition(function(p){
+    var s=addSite(p.coords.longitude,p.coords.latitude,"My location"); status("");
+    if(s) view.goTo({center:[s.lon,s.lat],zoom:14});
+  }, function(){ status("Could not get your location (permission denied?)"); });
+};
+
+/* upload sites (xlsx/csv/json) */
+document.getElementById("upSites").onchange=function(e){
+  var file=e.target.files[0]; if(!file) return;
+  var rd=new FileReader();
+  if(file.name.toLowerCase().endsWith(".json")){
+    rd.onload=function(){ try{ var j=JSON.parse(rd.result);
+      if(j.sites){ sites=j.sites; } else if(Array.isArray(j)){ sites=j; }
+      drawSites(); renderSites(); status("Loaded "+sites.length+" sites"); }catch(err){ status("JSON error"); } };
+    rd.readAsText(file);
+  } else {
+    rd.onload=function(){ var data=new Uint8Array(rd.result);
+      var wb=XLSX.read(data,{type:"array"});
+      var palette=["#1f78b4","#e31a1c","#33a02c","#ff7f00","#6a3d9a","#b15928","#0aa3a3","#c71585"];
+      var added=0, sheetIdx=0, geoQ=[];
+      wb.SheetNames.forEach(function(sn){
+        var rows=XLSX.utils.sheet_to_json(wb.Sheets[sn],{defval:""}); if(!rows.length) return;
+        var color=palette[sheetIdx % palette.length]; sheetIdx++;
+        rows.forEach(function(r){
+          var keys={}; Object.keys(r).forEach(function(k){keys[k.toLowerCase().trim()]=r[k];});
+          var lat=keys.lat!==undefined?keys.lat:keys.latitude, lon=keys.lon!==undefined?keys.lon:keys.longitude;
+          var nm=keys.name||keys.school||keys.site||keys.facility||"";
+          var extra={}; Object.keys(r).forEach(function(k){extra[k]=r[k];}); extra._sheet=sn; extra._color=color;
+          if(lat!==""&&lat!=null&&lon!==""&&lon!=null&&!isNaN(+lat)&&!isNaN(+lon)){
+            var s=addSite(+lon,+lat,nm,extra); if(s){ s.layer=sn; s._color=color; } added++;
+          } else {
+            var addr=keys.address||keys.addr||keys.location||keys.street||"";
+            var full=[addr,keys.city||"",keys.state||"",keys.zip||keys.zipcode||keys.postal||""].filter(function(x){return x!=="";}).join(", ");
+            if(full) geoQ.push({name:nm,addr:full,extra:extra,sheet:sn,color:color});
+          }
+        });
+      });
+      status("Imported "+added+" sites"+(geoQ.length?(" · geocoding "+geoQ.length+" address row(s)…"):""));
+      if(geoQ.length) geocodeRows(geoQ);
+    };
+    rd.readAsArrayBuffer(file);
+  }
+};
+// Geocode address-only rows via the ArcGIS World geocoder (best-effort; skips on failure)
+function geocodeRows(queue){
+  var i=0, ok=0, conc=4;
+  function one(item){
+    var url="https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&maxLocations=1&outSR=4326&singleLine="+encodeURIComponent(item.addr);
+    return esriRequest(url,{responseType:"json"}).then(function(r){
+      var c=r.data&&r.data.candidates&&r.data.candidates[0];
+      if(c&&c.location){ var s=addSite(c.location.x,c.location.y,item.name||item.addr,item.extra);
+        if(s){ s.layer=item.sheet; s._color=item.color; s.address=item.addr; } ok++; }
+    }).catch(function(){});
+  }
+  (function next(){ if(i>=queue.length){ status("Geocoded "+ok+"/"+queue.length+" address row(s)"); setTimeout(function(){status("");},2500); return; }
+    var chunk=queue.slice(i,i+conc); i+=conc; Promise.all(chunk.map(one)).then(next); })();
+}
+
+/* load all schools as sites */
+document.getElementById("loadSchoolsBtn").onclick=function(){
+  if(!territoryReady){ status("Service territory still loading — try again in a moment"); return; }
+  status("Loading in-territory schools…");
+  var all=[], skipped=0, off=0;
+  var env=territoryMask?territoryMask.extent:null;  // simple envelope for the server query (if available); exact test client-side
+  function page(){
+    var q={where:TERRITORY.schools.where,outFields:["NCESSCH","NAME","STREET","CITY","STATE","ZIP","NMCNTY","LAT","LON"],returnGeometry:true,outSpatialReference:{wkid:4326},start:off,num:2000,orderByFields:["OBJECTID"]};
+    if(env){ q.geometry=env; q.spatialRelationship="intersects"; }
+    schoolLayer.queryFeatures(q)
+    .then(function(r){
+      r.features.forEach(function(f){ var a=f.attributes; var g=f.geometry;
+        var lon=a.LON!=null?a.LON:(g?g.longitude:null), lat=a.LAT!=null?a.LAT:(g?g.latitude:null);
+        if(lon==null||lat==null) return;
+        if(!inTerritory(+lon,+lat)){ skipped++; return; }   // strict: inside the service territory only
+        all.push({id:siteId(),name:a.NAME,lon:+lon,lat:+lat,extra:{nces_id:a.NCESSCH,type:"public",address:a.STREET,city:a.CITY,state:a.STATE,zip:a.ZIP,county:a.NMCNTY}});
+      });
+      off+=r.features.length;
+      if(r.features.length===2000){ status("Loading in-territory schools… "+all.length); page(); }
+      else { sites=sites.concat(all); drawSites(); renderSites();
+        status("Loaded "+all.length+" in-territory schools ("+skipped+" outside territory skipped)"); setTimeout(function(){status("");},3500); }
+    }).catch(function(e){ status("School load error: "+e.message); });
+  }
+  page();
+};
+
+/* ---------------- SITE ANALYSIS ENGINE ---------------- */
+/* ---- transmission-line distance index (segment grid, by kV class) ---- */
+var txIndex=null, TX_CELL=0.02;
+function buildTxIndex(){
+  if(txIndex) return txIndex;
+  var T=window.DOMINION_TRANSMISSION, grid={};
+  if(T&&T.features){ T.features.forEach(function(f){
+    var g=f.geometry, parts=(g.type==="MultiLineString")?g.coordinates:[g.coordinates];
+    var vc=f.properties.vclass||"na", volt=f.properties.voltage;
+    parts.forEach(function(p){ for(var i=0;i+1<p.length;i++){ var a=p[i], b=p[i+1];
+      var steps=Math.max(1,Math.ceil(Math.max(Math.abs(b[0]-a[0]),Math.abs(b[1]-a[1]))/(TX_CELL*0.5))), seen={};
+      for(var t=0;t<=steps;t++){ var x=a[0]+(b[0]-a[0])*(t/steps), y=a[1]+(b[1]-a[1])*(t/steps);
+        var k=Math.floor(x/TX_CELL)+","+Math.floor(y/TX_CELL);
+        if(!seen[k]){ seen[k]=1; (grid[k]||(grid[k]=[])).push({a:a,b:b,vc:vc,volt:volt}); } } } }); }); }
+  txIndex={grid:grid,cell:TX_CELL}; return txIndex;
+}
+// nearest transmission line of a given class (or "all") within maxMi → {dist,volt,vclass} or null
+function nearestTxMi(lon,lat,classCode,maxMi){
+  var idx=buildTxIndex(), cell=idx.cell, gx=Math.floor(lon/cell), gy=Math.floor(lat/cell);
+  var rc=Math.ceil((maxMi/55)/cell)+1, kx=Math.cos(lat*Math.PI/180)||1, bd=1e9, bv=null, bc=null;
+  for(var dx=-rc;dx<=rc;dx++)for(var dy=-rc;dy<=rc;dy++){
+    var arr=idx.grid[(gx+dx)+","+(gy+dy)]; if(!arr) continue;
+    for(var i=0;i<arr.length;i++){ var s=arr[i]; if(classCode&&classCode!=="all"&&s.vc!==classCode) continue;
+      var Ax=(s.a[0]-lon)*kx*69, Ay=(s.a[1]-lat)*69, Bx=(s.b[0]-lon)*kx*69, By=(s.b[1]-lat)*69;
+      var ddx=Bx-Ax,ddy=By-Ay,L2=d
