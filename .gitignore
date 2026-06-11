@@ -6,3 +6,10 @@ dominion_dashboard_standalone.html
 dominion_*_export.xlsx
 dominion_footprint_analysis.xlsx
 dominion_captured_points.csv
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
