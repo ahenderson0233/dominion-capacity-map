@@ -11,10 +11,15 @@
 <script>if(typeof XLSX==="undefined"){document.write('<scr'+'ipt src="xlsx.full.min.js"><\/scr'+'ipt>');}</script>
 <!-- Baked Dominion service-territory polygon (VA + NC), derived from the capacity network. Loads via <script src> so it works from file:// and when served. -->
 <script src="dominion_territory.js"></script>
-<!-- All In-Service transmission lines within VA/NC (all utilities, all kV classes), real geometry, colored/filterable by kV class. -->
-<script src="dominion_transmission.js"></script>
-<!-- Substations (CSV + OSM, deduped). Loads via <script src> (sets window.DOMINION_SUBS_EMBED) so it works in the in-app preview and offline, not just via fetch(). -->
-<script src="dominion_substations.js"></script>
+<!-- Big data files (transmission ~4MB, substations ~2MB) are loaded LAZILY (non-blocking) so the
+     map and tabs come up immediately; they populate a moment later. window.__bigData resolves
+     once both are in (or failed, so load never hangs). -->
+<script>
+window.__bigData = Promise.all([
+  new Promise(function(res){ var s=document.createElement("script"); s.src="dominion_transmission.js"; s.async=true; s.onload=res; s.onerror=res; document.head.appendChild(s); }),
+  new Promise(function(res){ var s=document.createElement("script"); s.src="dominion_substations.js"; s.async=true; s.onload=res; s.onerror=res; document.head.appendChild(s); })
+]);
+</script>
 <style>
   :root{
     --navy:#1b2a4a; --navy2:#24385f; --slate:#3b5380; --slate-l:#e8edf6;
@@ -1398,7 +1403,4 @@ function nearestTxMi(lon,lat,classCode,maxMi){
   var idx=buildTxIndex(), cell=idx.cell, gx=Math.floor(lon/cell), gy=Math.floor(lat/cell);
   var rc=Math.ceil((maxMi/55)/cell)+1, kx=Math.cos(lat*Math.PI/180)||1, bd=1e9, bv=null, bc=null;
   for(var dx=-rc;dx<=rc;dx++)for(var dy=-rc;dy<=rc;dy++){
-    var arr=idx.grid[(gx+dx)+","+(gy+dy)]; if(!arr) continue;
-    for(var i=0;i<arr.length;i++){ var s=arr[i]; if(classCode&&classCode!=="all"&&s.vc!==classCode) continue;
-      var Ax=(s.a[0]-lon)*kx*69, Ay=(s.a[1]-lat)*69, Bx=(s.b[0]-lon)*kx*69, By=(s.b[1]-lat)*69;
-      var ddx=Bx-Ax,ddy=By-Ay,L2=d
+    var arr=idx.grid[(gx+dx)+","+(gy+
