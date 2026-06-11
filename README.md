@@ -1,102 +1,84 @@
 # Dominion Hosting Capacity & Siting Dashboard
 
-Interactive map for screening large-load + battery-storage (BESS) and PV sites across
-**Dominion Energy's Virginia and North Carolina service territories**. It overlays Dominion's
-published PV/BESS (generation) and EV (load) hosting-capacity feeders, substations
-(utility CSV + OpenStreetMap, deduped), and transmission lines, and scores candidate parcels
-(e.g. public schools) against user-defined capacity, substation, and transmission criteria.
+An interactive map for screening large‑load + battery‑storage (BESS) and PV sites across
+**Dominion Energy's Virginia and North Carolina service territories**, built on the ArcGIS
+Maps SDK for JavaScript. It overlays Dominion's published PV/BESS (generation) and EV (load)
+hosting‑capacity feeders, substations, and transmission lines, and scores candidate parcels
+(e.g. public schools) against user‑defined capacity, substation, and transmission criteria.
 
-The Dominion counterpart to the ComEd/Ameren Illinois dashboard
-(https://ahenderson0233.github.io/comed-capacity-map/).
-
-**Live site:** `https://<your-username>.github.io/dominion-capacity-map/` (after the deploy below)
+This is the Dominion counterpart to the ComEd/Ameren Illinois dashboard.
 
 ---
 
-## What's in this repo
+## Required files (must sit in the same folder)
 
-| File | Required? | Purpose |
-|------|-----------|---------|
-| `index.html` | ✅ | The dashboard application |
-| `dominion_territory.js` | ✅ | VA + NC service-territory boundary (clips substations & schools) |
-| `dominion_transmission.js` | ✅ | All in-service transmission lines in VA + NC, by kV class |
-| `dominion_substations.js` | ✅ | Substation point layer (utility CSV + OSM, deduped) — loads via `<script>` |
-| `dominion_substations.json` | optional | Same substation data as JSON (fetch fallback) |
-| `xlsx.full.min.js` | ✅ | SheetJS — needed to *read* uploaded spreadsheets (Excel **export** is dependency-free) |
-| `footprint-proxy.worker.js` | optional | Cloudflare Worker source for the parcel/footprint proxy (see below) |
-| `.gitignore`, `README.md` | — | Repo housekeeping |
+The dashboard loads its data from files next to `index.html`. All four must be present:
 
-The ArcGIS Maps SDK and the live Dominion capacity layers load from the internet, so the page
-needs a connection. Everything else is in the repo.
+| File | Purpose |
+|------|---------|
+| `index.html` | The dashboard application |
+| `dominion_territory.js` | VA + NC service‑territory boundary (used to clip substations & schools) |
+| `dominion_transmission.js` | All in‑service transmission lines in VA + NC, by kV class |
+| `dominion_substations.js` | Substation point layer (CSV + OSM, deduped) — loads via `<script src>` so it works offline / in preview |
+| `dominion_substations.json` | Same substation data as JSON (fetch fallback; safe to keep for reference) |
+| `xlsx.full.min.js` | SheetJS offline fallback for Excel/CSV export |
 
----
-
-## Deploy to GitHub Pages (same process as the Illinois tool)
-
-1. **Create the repository.** On github.com → **New repository**. Name it
-   `dominion-capacity-map`, set it **Public**, and click **Create repository**.
-2. **Upload the files.** On the repo page click **Add file → Upload files**, then drag in
-   **all** the files from this folder (`index.html`, the four data/library `.js` files,
-   `dominion_substations.json`, `footprint-proxy.worker.js`, `README.md`, `.gitignore`).
-   Wait for the large files (`dominion_transmission.js` ≈ 4 MB, `dominion_substations.js` ≈ 2 MB)
-   to finish, then **Commit changes**.
-3. **Turn on Pages.** Repo **Settings → Pages**. Under *Build and deployment*, Source =
-   **Deploy from a branch**, Branch = **main**, folder = **/ (root)**, then **Save**.
-4. **Wait ~1 minute**, refresh the Pages settings page, and open the published URL:
-   `https://<your-username>.github.io/dominion-capacity-map/`.
-
-To update later: **Add file → Upload files** (overwrite) or push commits; Pages redeploys
-automatically in a minute or so.
-
-Everything works on Pages out of the box **except** the Footprint parcel lookups — see next.
+The ArcGIS SDK 4.29 and the live capacity layers load from the internet, so an internet
+connection is required. SheetJS loads from jsdelivr (the same source the Illinois tool uses),
+with the local `xlsx.full.min.js` as an offline/firewall fallback.
 
 ---
 
-## Footprint / parcel lookups (Cloudflare Worker)
+## Running it
 
-The Footprint tab pulls parcels from VGIN (VA) and NC OneMap (NC). Browsers block those
-cross-origin requests on a static site, so a tiny proxy is required (this is the same
-limitation the Illinois tool documents).
+**Locally:** open `index.html` in a browser. The map, capacity layers, substations, transmission,
+schools, Find/Sites analysis, and Excel/CSV exports all work directly.
 
-1. Sign in at **dash.cloudflare.com → Workers & Pages → Create → Worker**.
-2. Replace the worker code with the contents of `footprint-proxy.worker.js`, **Deploy**.
-3. Copy the worker URL (e.g. `https://dominion-proxy.<account>.workers.dev`).
-4. In the dashboard, open **Footprint → Advanced: where parcel data comes from** and paste the
-   worker URL into the proxy-base box.
+**Footprint (parcel) lookups need a proxy.** The Footprint tab pulls parcels from VGIN (VA) and
+NC OneMap (NC). Browsers block many of those cross‑origin requests when the page is opened as a
+file or hosted statically. Two options:
 
-Without this, the map, capacity layers, substations, transmission, Find, Site Analysis, and all
-Excel/CSV exports still work — only the footprint parcel areas fall back to "no parcel found".
+1. **Local Python server** — run `python server.py` and open the dashboard through it. The
+   included `/gis` proxy forwards parcel/building requests. Leave the Footprint → *Advanced*
+   "proxy base" box empty.
+2. **Static hosting (GitHub Pages):** deploy the included `footprint-proxy.worker.js` as a
+   Cloudflare Worker and paste its URL into the Footprint → *Advanced* "proxy base" box.
+   Without this, footprint falls back to building‑only and flags the row.
 
-(For local use instead of a worker, run `server.py` from the project's working folder and open
-`http://localhost:8000`; leave the proxy-base box empty.)
+Everything **except** the footprint parcel lookups works on GitHub Pages with no proxy.
 
 ---
 
 ## Features
 
-- **Layers** — PV/BESS, EV load, or combined (averaged) capacity; substations with class filter,
-  min-kV filter, live per-class legend counts, and Excel export; transmission lines filterable by
-  kV class; service-territory outline; NCES schools; satellite basemap toggle.
-- **Find** — minimum gen/load MW, voltage floor, optional radius, dual-use eligibility distance,
-  and optional substation / transmission eligibility (with a kV-class dropdown). **Run Find**
-  highlights matching feeders and scores every loaded site in one step.
+- **Layers** — PV/BESS, EV load, or combined (averaged) capacity; substations with class +
+  min‑kV filter and Excel export; transmission lines filterable by kV class; service‑territory
+  outline; NCES schools; satellite basemap toggle. Capacity line width scales with zoom so dense
+  feeders stay legible.
+- **Find** — minimum gen/load MW, voltage floor, optional search radius, dual‑use eligibility
+  distance, and optional **substation** / **transmission** eligibility (with a kV‑class dropdown).
+  **Run Find** highlights matching feeders *and* scores every loaded site in one step.
 - **Sites** — add by coordinates, map click, address search, or current location; upload Excel/CSV
-  (each sheet becomes a colored layer; address-only rows are geocoded); per-site breakdown; sort
-  by generation/load/name; coordinate-capture log (CSV); Excel + `.json` export. The site-analysis
-  Excel export contains exactly the sites matching the current Find parameters.
-- **Footprint** — lot area (geometry + assessor), building area (USA Structures), outdoor area, with
-  review flags and a dedicated Excel export; click a site name to zoom and open its popup.
-- **Save standalone (.html)** — self-contained offline copy with all data embedded.
+  (each sheet becomes its own colored layer; address‑only rows are geocoded); per‑site breakdown
+  (feeders + sum gen/load at 0.1/0.3/0.5 mi, qualifying feeders, nearest substation & transmission);
+  sort by generation/load/name; coordinate‑capture log with CSV export; Excel + `.json` export.
+- **Footprint** — lot area (geometry‑computed **and** assessor‑recorded), building area
+  (USA Structures), and outdoor area for every site, with a results table, review flags, and a
+  dedicated Excel export. Click a site name to zoom and open its popup.
+- **Save standalone (.html)** — exports a single self‑contained copy of the dashboard with the
+  territory, transmission, substation, and site data embedded, so it opens from any folder without
+  the sibling files (still needs internet for the SDK, basemap, and live capacity layers).
 
 ---
 
 ## Data sources & disclaimer
 
-Capacity feeders/voltages: Dominion public Experience Builder hosting-capacity services.
-Substations: utility dataset + OpenStreetMap (`power=substation`), deduped at 200 m.
-Transmission: HIFLD/utility datasets. Parcels: VGIN + NC OneMap. Buildings: Esri USA Structures.
-Schools: NCES public school locations.
+Capacity feeders and operating voltages come from Dominion's public Experience Builder hosting‑
+capacity services; substations and transmission lines from HIFLD/utility datasets; parcels from
+VGIN and NC OneMap; building footprints from Esri's USA Structures; schools from the NCES public
+school locations service.
 
 All capacity, footprint, and proximity figures are **modeled estimates for screening only** and
-must be independently verified before any siting, interconnection, or investment decision. Site
-scoring is intentionally not included — ranking is left to the user's own validation methodology.
+must be independently verified before any siting, interconnection, or investment decision.
+Site scoring is intentionally **not** included — ranking is left to the user's own validation
+methodology.
