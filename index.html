@@ -1403,4 +1403,524 @@ function nearestTxMi(lon,lat,classCode,maxMi){
   var idx=buildTxIndex(), cell=idx.cell, gx=Math.floor(lon/cell), gy=Math.floor(lat/cell);
   var rc=Math.ceil((maxMi/55)/cell)+1, kx=Math.cos(lat*Math.PI/180)||1, bd=1e9, bv=null, bc=null;
   for(var dx=-rc;dx<=rc;dx++)for(var dy=-rc;dy<=rc;dy++){
-    var arr=idx.grid[(gx+dx)+","+(gy+
+    var arr=idx.grid[(gx+dx)+","+(gy+dy)]; if(!arr) continue;
+    for(var i=0;i<arr.length;i++){ var s=arr[i]; if(classCode&&classCode!=="all"&&s.vc!==classCode) continue;
+      var Ax=(s.a[0]-lon)*kx*69, Ay=(s.a[1]-lat)*69, Bx=(s.b[0]-lon)*kx*69, By=(s.b[1]-lat)*69;
+      var ddx=Bx-Ax,ddy=By-Ay,L2=ddx*ddx+ddy*ddy, t=L2>0?-((Ax*ddx+Ay*ddy)/L2):0; t=t<0?0:(t>1?1:t);
+      var cx=Ax+t*ddx, cy=Ay+t*ddy, d=Math.sqrt(cx*cx+cy*cy);
+      if(d<=maxMi && d<bd){ bd=d; bv=s.volt; bc=s.vc; } } }
+  return bd===1e9?null:{dist:bd,volt:bv,vclass:bc};
+}
+function nearestSub(lon,lat,radMi){
+  if(!subLayer) return Promise.resolve({count:0,nearest:null,list:[]});
+  var q={ where:subLayer.definitionExpression||"1=1", geometry:new Circle({center:[lon,lat],radius:radMi,radiusUnit:"miles"}),
+    spatialRelationship:"intersects", outFields:[SUBF.name,SUBF.kv], returnGeometry:true, outSpatialReference:{wkid:4326}, num:3000 };
+  return subLayer.queryFeatures(q).then(function(r){
+    var list=[];
+    r.features.forEach(function(f){ var g=f.geometry; if(!g) return;
+      list.push({name:f.attributes[SUBF.name],kv:f.attributes[SUBF.kv],lon:g.longitude,lat:g.latitude,
+        dist:haversineMi(lat,lon,g.latitude,g.longitude)}); });
+    list.sort(function(a,b){return a.dist-b.dist;});
+    return {count:list.length, nearest:list[0]||null, list:list};
+  });
+}
+// list of {mw,dist,lon,lat,oid} for capacity features within maxMi (+ best, nearest line)
+function capScanList(role,lon,lat,maxMi){
+  var pt=new Point({longitude:lon,latitude:lat});
+  // FAST PATH: scan the in-memory cache (no server round-trip).
+  if(capCache&&capCache[role]){
+    return Promise.resolve(scanIndex(capCache[role],lon,lat,maxMi));
+  }
+  // FALLBACK: per-site server query (used only before the cache has loaded).
+  var cfg=capLayers[role]._cfg;
+  return capLayers[role].queryFeatures({ where:"1=1", geometry:new Circle({center:[lon,lat],radius:maxMi,radiusUnit:"miles"}),
+    spatialRelationship:"intersects", outFields:[cfg.valueField,cfg.voltField,"OBJECTID"],
+    returnGeometry:true, outSpatialReference:{wkid:4326}, maxAllowableOffset:0.0004, num:2000 })
+   .then(function(r){ var list=[],best=0,bd=1e9,bkv=null;
+     r.features.forEach(function(f){ if(!f.geometry) return; var nc=geometryEngine.nearestCoordinate(f.geometry,pt);
+       if(!nc||!nc.coordinate) return; var d=haversineMi(lat,lon,nc.coordinate.latitude,nc.coordinate.longitude);
+       var mw=f.attributes[cfg.valueField]; if(mw>best) best=mw; if(d<bd){bd=d;bkv=kvOf(f.attributes[cfg.voltField]);}
+       list.push({mw:mw,dist:d,lon:nc.coordinate.longitude,lat:nc.coordinate.latitude,oid:f.attributes.OBJECTID}); });
+     return {list:list,best:best,nearDist:(bd===1e9?null:bd),nearKv:bkv}; });
+}
+function analyzeSite(s,c){
+  var capR=Math.max(0.5,c.elig||1);
+  var subQR=Math.max(c.subRad||3, c.subElig||0)+0.1;   // cover both the count radius and the eligibility threshold
+  return ensureCapCache().then(function(){
+  return Promise.all([ capScanList("gen",s.lon,s.lat,capR), capScanList("load",s.lon,s.lat,capR), nearestSub(s.lon,s.lat,subQR) ])
+  .then(function(r){
+    var gen=r[0], load=r[1], subs=r[2];
+    function bucket(rad){ var lf=load.list.filter(function(x){return x.dist<=rad;});
+      var distinct={}; gen.list.forEach(function(x){ if(x.dist<=rad) distinct[x.mw]=1; });
+      var sumGen=Object.keys(distinct).reduce(function(a,k){return a+(+k);},0);
+      var sumLoad=lf.reduce(function(a,x){return a+x.mw;},0);
+      return {feeders:lf.length, sumGen:sumGen, sumLoad:sumLoad}; }
+    s.r01=bucket(0.1); s.r03=bucket(0.3); s.r05=bucket(0.5);
+    var elig=c.elig||1, gMin=c.gen||0, lMin=c.load||0;
+    var bestGen=0; gen.list.forEach(function(x){ if(x.dist<=elig&&x.mw>bestGen) bestGen=x.mw; });
+    var bestLoad=0; load.list.forEach(function(x){ if(x.dist<=elig&&x.mw>bestLoad) bestLoad=x.mw; });
+    s.gen_MW_avail=bestGen; s.load_MW_avail=bestLoad;
+    var genOK=(gMin<=0)||(bestGen>=gMin);
+    var qf=load.list.filter(function(x){return x.dist<=elig && x.mw>=lMin && genOK;}).sort(function(a,b){return a.dist-b.dist;});
+    s.qual={ count:qf.length,
+      list:qf.slice(0,8).map(function(x){return {label:"Seg #"+x.oid,lon:x.lon,lat:x.lat,dist:x.dist,mw:x.mw};}),
+      nearest:qf[0]?{label:"Seg #"+qf[0].oid,dist:qf[0].dist,load:qf[0].mw,gen:bestGen}:null };
+    s.dual_qualifies=(gMin>0&&lMin>0)?(bestGen>=gMin&&bestLoad>=lMin):null;
+    var subRad=c.subRad||3;
+    s.subs_within_radius=subs.list.filter(function(x){return x.dist<=subRad;}).length;
+    s.subList=subs.list.slice(0,8);
+    s.nearest_sub_name=subs.nearest?subs.nearest.name:null;
+    s.nearest_sub_kv=subs.nearest?subs.nearest.kv:null;
+    s.nearest_sub_dist_mi=subs.nearest?round2(subs.nearest.dist):null;
+    var lineDist=null,lineKv=null; [gen,load].forEach(function(o){ if(o.nearDist!=null&&(lineDist===null||o.nearDist<lineDist)){lineDist=o.nearDist;lineKv=o.nearKv;} });
+    s.nearest_line_kv=lineKv; s.nearest_line_dist_mi=lineDist!=null?round2(lineDist):null;
+    // nearest transmission line of the selected class (reported regardless; used for eligibility)
+    var tx=nearestTxMi(s.lon,s.lat,c.txEligClass||"all",Math.max(c.txElig||0,20));
+    s.nearest_tx_dist_mi=tx?round2(tx.dist):null;
+    s.nearest_tx_kv=tx?(tx.volt>0?tx.volt:null):null;
+    s.nearest_tx_class=tx?tx.vclass:null;
+    s.analyzed=true; return s;
+  });
+  });
+}
+function openSitePopup(s,loc){
+  view.popup.open({location:loc, title:s.name, content:s.analyzed?siteDetailHTML(s):"<div class='small'>Analyzing…</div>"});
+  if(s.analyzed) return;
+  analyzeSite(s,readFind()).then(function(){ drawSites(); renderSites();
+    view.popup.open({location:loc, title:s.name, content:siteDetailHTML(s)}); });
+}
+// Scan the capacity network (the heatmap polylines = the grid) around a site:
+// returns max available MW AND the nearest grid line's distance + operating voltage.
+function capScan(role,lon,lat,distMi){
+  var cfg=capLayers[role]._cfg, pt=new Point({longitude:lon,latitude:lat});
+  var q={ where:"1=1", geometry:new Circle({center:[lon,lat],radius:distMi,radiusUnit:"miles"}),
+    spatialRelationship:"intersects", outFields:[cfg.valueField,cfg.voltField],
+    returnGeometry:true, outSpatialReference:{wkid:4326}, maxAllowableOffset:0.0004, geometryPrecision:6, num:1500 };
+  return capLayers[role].queryFeatures(q).then(function(r){
+    var maxMW=0, bd=1e9, bkv=null;
+    r.features.forEach(function(f){
+      var v=f.attributes[cfg.valueField]; if(v>maxMW) maxMW=v;
+      if(!f.geometry) return;
+      var nc=geometryEngine.nearestCoordinate(f.geometry,pt);
+      if(nc&&nc.coordinate){ var d=haversineMi(lat,lon,nc.coordinate.latitude,nc.coordinate.longitude);
+        if(d<bd){ bd=d; bkv=kvOf(f.attributes[cfg.voltField]); } }
+    });
+    return { maxMW:maxMW, nearDist:(bd===1e9?null:bd), nearKv:bkv };
+  });
+}
+
+/* ---------------- FOOTPRINT ---------------- */
+var lastPt=null;
+function gx(url){ var p=document.getElementById("proxyBase").value.trim();
+  return p? (p.replace(/\/$/,"")+"/gis?url="+encodeURIComponent(url)) : url; }
+// Parcels: VGIN (VA) + NC OneMap (NC) only. No ReportAll, no estimation — misses are flagged.
+function queryParcel(state,lon,lat){
+  var url=TERRITORY.parcels[state];
+  var q=url+"/query?where=1=1&geometry="+lon+","+lat+"&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=*&returnGeometry=true&outSR=4326&f=json";
+  return esriRequest(gx(q),{responseType:"json"}).then(function(r){
+    var fs=r.data&&r.data.features; if(!fs||!fs.length) return null;
+    return {state:state, attrs:fs[0].attributes, geom:fs[0].geometry};
+  }).catch(function(){ return null; });
+}
+function ringsAreaAcres(geom){ // geodesic via geometryEngine
+  try{ var poly={type:"polygon",rings:geom.rings,spatialReference:{wkid:4326}};
+    var a=geometryEngine.geodesicArea(poly,"square-meters"); return Math.abs(a)/4046.8564224; }
+  catch(e){ return null; }
+}
+function buildingsIn(geom){
+  if(!geom||!geom.rings) return Promise.resolve(null);
+  var ext=ringExtent(geom.rings);
+  var url=TERRITORY.buildings+"/query?where=1=1&geometry="+JSON.stringify({xmin:ext[0],ymin:ext[1],xmax:ext[2],ymax:ext[3],spatialReference:{wkid:4326}})+
+    "&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=SQMETERS&returnGeometry=false&outSR=4326&f=json";
+  return esriRequest(gx(url),{responseType:"json"}).then(function(r){
+    var fs=r.data&&r.data.features; if(!fs) return null;
+    var sm=0; fs.forEach(function(f){ var v=f.attributes.SQMETERS||f.attributes.Shape__Area||0; sm+=v; });
+    return {count:fs.length, sqft:Math.round(sm*10.7639)};
+  }).catch(function(){ return null; });
+}
+function ringExtent(rings){ var xm=1e9,ym=1e9,xM=-1e9,yM=-1e9;
+  rings.forEach(function(r){ r.forEach(function(p){ if(p[0]<xm)xm=p[0]; if(p[0]>xM)xM=p[0]; if(p[1]<ym)ym=p[1]; if(p[1]>yM)yM=p[1]; }); });
+  return [xm,ym,xM,yM]; }
+
+// whole-property (NC): sum same-owner parcels intersecting the parcel envelope
+function wholePropertyNC(parcel,owner){
+  var ext=ringExtent(parcel.geom.rings);
+  var env=JSON.stringify({xmin:ext[0],ymin:ext[1],xmax:ext[2],ymax:ext[3],spatialReference:{wkid:4326}});
+  var url=TERRITORY.parcels.NC+"/query?where=ownname='"+owner.replace(/'/g,"''")+
+    "'&geometry="+env+"&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=gisacres&returnGeometry=false&outSR=4326&f=json";
+  return esriRequest(gx(url),{responseType:"json"}).then(function(r){
+    var fs=r.data&&r.data.features; if(!fs||fs.length<=1) return null;
+    var acres=0,cnt=0; fs.forEach(function(f){ var v=f.attributes.gisacres; if(v>0){acres+=v;cnt++;} });
+    return {acres:round2(acres),count:cnt};
+  }).catch(function(){ return null; });
+}
+// footprint for one site: lot area + building area + outdoor area (lot − building)
+// pull the county/assessor recorded land area (acres) from common parcel fields
+function fpAssessorAcres(a){
+  if(!a) return null;
+  var af=["gisacres","GISACRES","deedacres","DEEDACRES","calc_acres","CALCACRES","ACREAGE","Acreage","ACRES","Acres","acres","GIS_ACRES"];
+  for(var i=0;i<af.length;i++){ var v=a[af[i]]; if(typeof v==="number"&&v>0&&v<1e6) return v; }
+  var sf=["LANDSF","landsqft","LAND_SQFT","LANDAREA","LndSF"];
+  for(var j=0;j<sf.length;j++){ var s=a[sf[j]]; if(typeof s==="number"&&s>1000) return s/43560; }
+  return null;
+}
+function footprintSite(s,whole){
+  return queryParcel("NC",s.lon,s.lat).then(function(nc){ return nc?nc:queryParcel("VA",s.lon,s.lat); })
+  .then(function(parcel){
+    if(!parcel){ s.lot_source="not found"; s.lot_acres=null; s.lot_geom_acres=null; s.lot_assr_acres=null; return buildingsIn(null); }
+    var a=parcel.attrs;
+    s.lot_source=parcel.state==="NC"?"NC OneMap":"VGIN";
+    var geomAc=ringsAreaAcres(parcel.geom), assrAc=fpAssessorAcres(a);
+    s.lot_geom_acres=(geomAc!=null)?round2(geomAc):null;
+    s.lot_assr_acres=(assrAc!=null)?round2(assrAc):null;
+    var ac=(assrAc!=null&&assrAc>0)?assrAc:geomAc;   // prefer assessor figure for the working lot value
+    s.lot_acres=(ac!=null)?round2(ac):null;
+    s.owner=parcel.state==="NC"?(a.ownname||null):(s.owner||null);
+    if(whole && parcel.state==="NC" && a.ownname){
+      return wholePropertyNC(parcel,a.ownname).then(function(extra){
+        if(extra){ s.lot_acres=extra.acres; s.lot_assr_acres=round2(extra.acres); s.whole_parcels=extra.count; }
+        return buildingsIn(parcel.geom); });
+    }
+    return buildingsIn(parcel.geom);
+  }).then(function(b){
+    s.building_sqft=b?b.sqft:null;
+    s.outdoor_sqft=(s.lot_acres!=null&&s.building_sqft!=null)?Math.max(0,Math.round(s.lot_acres*43560-s.building_sqft)):null;
+    s.footprint_done=true; return s;
+  }).catch(function(){ s.lot_source=s.lot_source||"error"; s.footprint_done=true; return s; });
+}
+document.getElementById("fpAnalyzeBtn").onclick=function(){
+  if(!sites.length){ status("No sites loaded"); return; }
+  var c=readFind(), only=document.getElementById("fpOnlyMatch").checked, whole=document.getElementById("fpWhole").checked;
+  var conc=Math.max(1,Math.min(12,+document.getElementById("fpParallel").value||5));
+  if(only && !sites.some(function(s){return s.analyzed;})){ status("Run 'Analyze sites' first so matches are known"); return; }
+  var targets=only?sites.filter(function(s){return siteMatches(s,c);}):sites.slice();
+  if(!targets.length){ status("No "+(only?"matching ":"")+"sites"); return; }
+  var i=0; status("Footprint 0/"+targets.length+"…");
+  function next(){
+    if(i>=targets.length){ renderSites(); renderFootprintResults(targets); status("Footprint done — "+targets.length+" sites"); setTimeout(function(){status("");},2500); return; }
+    var chunk=targets.slice(i,i+conc); i+=conc;
+    Promise.all(chunk.map(function(s){return footprintSite(s,whole);})).then(function(){ if(i%40<conc) renderSites(); status("Footprint "+Math.min(i,targets.length)+"/"+targets.length); next(); })
+      .catch(function(e){ status("Footprint error: "+e.message); next(); });
+  }
+  next();
+};
+
+/* ---------------- footprint results table + Excel export ---------------- */
+function fpExceedsLot(s){ return s.building_sqft!=null && s.lot_acres!=null && s.building_sqft > s.lot_acres*43560; }
+function fpFlags(s){ var f=[];
+  if(s.lot_source==="not found") f.push("<span style='color:#d7191c'>no parcel found — verify</span>");
+  else if(s.lot_source==="error") f.push("<span style='color:#d7191c'>lookup error — verify</span>");
+  if(fpExceedsLot(s)) f.push("<span style='color:#d7191c'>building &gt; lot — verify</span>");
+  if(s.whole_parcels) f.push("whole property: "+s.whole_parcels+" parcels");
+  return f.join(" · "); }
+function renderFootprintResults(targets){
+  var done=(targets||sites).filter(function(s){return s.footprint_done;});
+  var sum=document.getElementById("fpSummary"), host=document.getElementById("fpResults"), btn=document.getElementById("fpExportBtn");
+  if(!done.length){ sum.innerHTML=""; host.innerHTML=""; btn.style.display="none"; return; }
+  var withParcel=done.filter(function(s){return s.lot_source==="NC OneMap"||s.lot_source==="VGIN";}).length;
+  var notFound=done.filter(function(s){return s.lot_source==="not found";}).length;
+  var errs=done.filter(function(s){return s.lot_source==="error";}).length;
+  var exceed=done.filter(fpExceedsLot).length;
+  sum.innerHTML="Done — <b>"+done.length+"</b> site(s); <b>"+withParcel+"</b> with parcel data"+
+    (notFound?(", "+notFound+" not found"):"")+(errs?(", "+errs+" error"):"")+
+    (exceed?(" · <span style='color:#d7191c'>"+exceed+" building&gt;lot</span>"):"");
+  function sf(ac){ return ac!=null?Math.round(ac*43560).toLocaleString():"–"; }
+  var tbl="<div style='overflow-x:auto'><table class='fp' style='width:100%;font-size:11px;margin-top:6px'>"+
+    "<tr><th style='text-align:left'>Site</th><th style='text-align:right'>Lot ft² (geom)</th><th style='text-align:right'>Lot ft² (assr)</th><th style='text-align:right'>Bldg ft²</th><th style='text-align:right'>Outdoor ft²</th><th style='text-align:right'>Source</th></tr>";
+  done.slice(0,200).forEach(function(s){ var fl=fpFlags(s);
+    tbl+="<tr><td style='text-align:left'><span class='lnk fpname' data-id='"+s.id+"' style='cursor:pointer'>"+esc(s.name)+"</span>"+(fl?("<div class='small'>"+fl+"</div>"):"")+"</td>"+
+      "<td style='text-align:right'>"+sf(s.lot_geom_acres)+"</td>"+
+      "<td style='text-align:right'>"+sf(s.lot_assr_acres)+"</td>"+
+      "<td style='text-align:right'>"+(s.building_sqft!=null?s.building_sqft.toLocaleString():"–")+"</td>"+
+      "<td style='text-align:right'>"+(s.outdoor_sqft!=null?s.outdoor_sqft.toLocaleString():"–")+"</td>"+
+      "<td style='text-align:right'>"+(s.lot_source||"–")+"</td></tr>"; });
+  tbl+="</table></div>";
+  if(done.length>200) tbl+="<div class='muted small'>(showing first 200; all "+done.length+" are exported)</div>";
+  host.innerHTML=tbl; btn.style.display="";
+  // click a site name to zoom + open its popup (same as Sites "locate")
+  host.querySelectorAll(".fpname").forEach(function(el){ el.onclick=function(){ var s=findSite(el.getAttribute("data-id")); if(s) locateSite(s); }; });
+}
+var FP_COLS=["name","layer","state","county","lat","lon","lot_source","lot_acres",
+  "lot_geom_sqft","lot_assr_sqft","building_sqft","outdoor_sqft","whole_parcels","owner","building_exceeds_lot","flag","address","nces_id","type"];
+function fpRow(s){ var e=s.extra||{};
+  var exceed=fpExceedsLot(s)?"YES":"";
+  var flags=[]; if(s.lot_source==="not found"||s.lot_source==="error") flags.push("no parcel");
+  if(exceed) flags.push("building>lot"); if(s.whole_parcels) flags.push("whole property "+s.whole_parcels);
+  return { name:s.name, layer:s.layer||e._sheet||"", state:s.state||e.state||"", county:s.county||e.county||"", lat:s.lat, lon:s.lon,
+    lot_source:s.lot_source||"", lot_acres:s.lot_acres!=null?s.lot_acres:"",
+    lot_geom_sqft:s.lot_geom_acres!=null?Math.round(s.lot_geom_acres*43560):"",
+    lot_assr_sqft:s.lot_assr_acres!=null?Math.round(s.lot_assr_acres*43560):"",
+    building_sqft:s.building_sqft!=null?s.building_sqft:"", outdoor_sqft:s.outdoor_sqft!=null?s.outdoor_sqft:"",
+    whole_parcels:s.whole_parcels||"", owner:s.owner||e.owner||"", building_exceeds_lot:exceed, flag:flags.join("; "),
+    address:s.address||e.address||"", nces_id:e.nces_id||"", type:e.type||"" }; }
+document.getElementById("fpExportBtn").onclick=function(){
+  var done=sites.filter(function(s){return s.footprint_done;});
+  if(!done.length){ status("No footprint results to export — run Analyze footprint first"); return; }
+  var rows=done.map(fpRow);
+  if(exportXlsx(FP_COLS,rows,"Footprint analysis","dominion_footprint_analysis.xlsx")) status("Exported "+rows.length+" footprint rows to Excel");
+};
+
+function captureSite(lon,lat,name){
+  lastPt={lon:lon,lat:lat};
+  document.getElementById("ctrLon").value=lon.toFixed(5);
+  document.getElementById("ctrLat").value=lat.toFixed(5);
+  document.getElementById("addLon").value=lon.toFixed(5);
+  document.getElementById("addLat").value=lat.toFixed(5);
+  centerLyr.removeAll();
+  centerLyr.add(new Graphic({geometry:new Point({longitude:lon,latitude:lat}),
+    symbol:{type:"simple-marker",style:"x",size:14,outline:{color:[214,40,40],width:2.5}}}));
+  // switch to footprint tab view
+  runFootprint(lon,lat,name);
+}
+document.getElementById("analyzeLast").onclick=function(){ if(lastPt) runFootprint(lastPt.lon,lastPt.lat); else status("No point captured yet"); };
+
+function runFootprint(lon,lat,name){
+  var out=document.getElementById("footOut"); out.classList.remove("muted");
+  out.innerHTML="<b>"+(name||"Captured point")+"</b><div class='muted'>"+lat.toFixed(5)+", "+lon.toFixed(5)+"</div><div class='small'>Analyzing…</div>";
+  var c=readFind();
+  // parcel: try NC then VA
+  queryParcel("NC",lon,lat).then(function(nc){
+    return nc?nc:queryParcel("VA",lon,lat);
+  }).then(function(parcel){
+    var prov, acres=null, owner=null, addr=null, src=null;
+    if(parcel){
+      src=parcel.state==="NC"?"NC OneMap":"VGIN";
+      if(parcel.state==="NC"){ var a=parcel.attrs;
+        acres=(a.gisacres!=null&&a.gisacres>0)?a.gisacres:ringsAreaAcres(parcel.geom);
+        owner=a.ownname||null; addr=a.siteadd||null; }
+      else { acres=ringsAreaAcres(parcel.geom); owner=parcel.attrs.OWNER||parcel.attrs.NAME||null; }
+      prov=src;
+    }
+    var bld=parcel?buildingsIn(parcel.geom):Promise.resolve(null);
+    return Promise.all([Promise.resolve({acres:acres,owner:owner,addr:addr,src:prov,parcel:parcel}), bld,
+      nearestSub(lon,lat,c.subRad), capScan("gen",lon,lat,c.subRad), capScan("load",lon,lat,c.subRad)]);
+  }).then(function(r){
+    var p=r[0], b=r[1], subs=r[2], gL=r[3], lL=r[4];
+    var lineDist=null, lineKv=null;
+    [gL,lL].forEach(function(x){ if(x.nearDist!=null && (lineDist===null||x.nearDist<lineDist)){ lineDist=x.nearDist; lineKv=x.nearKv; } });
+    var html="<b>"+(name||"Captured point")+"</b><div class='muted'>"+lat.toFixed(5)+", "+lon.toFixed(5)+"</div><table class='fp'>";
+    html+="<tr><td>Parcel source</td><td>"+(p.src||"<span style='color:#d7191c'>no parcel found</span>")+"</td></tr>";
+    html+="<tr><td>Parcel area</td><td>"+(p.acres!=null?(Math.round(p.acres*100)/100+" ac"):"– (flagged)")+"</td></tr>";
+    html+="<tr><td>Owner</td><td>"+(p.owner||"–")+"</td></tr>";
+    if(p.addr) html+="<tr><td>Address</td><td>"+p.addr+"</td></tr>";
+    html+="<tr><td>Building footprint</td><td>"+(b?(b.sqft.toLocaleString()+" sqft ("+b.count+")"):"–")+"</td></tr>";
+    html+="<tr><td>Substations within "+c.subRad+" mi</td><td>"+subs.count+"</td></tr>";
+    if(subs.nearest) html+="<tr><td>Nearest substation</td><td>"+subs.nearest.name+" ("+(subs.nearest.kv>0?subs.nearest.kv+" kV":"?")+", "+(Math.round(subs.nearest.dist*100)/100)+" mi)</td></tr>";
+    html+="<tr><td>Nearest grid line</td><td>"+(lineDist!=null?((lineKv?lineKv+" kV":"? kV")+", "+(Math.round(lineDist*100)/100)+" mi"):"– (none within "+c.subRad+" mi)")+"</td></tr>";
+    html+="</table>";
+    if(!p.src) html+="<div class='hint'>No parcel found in VGIN (VA) or NC OneMap (NC) for this point — flagged, no estimate. If running statically, set a Proxy base (Cloudflare Worker) so VGIN / NC OneMap can be reached, or run behind the local Python server.</div>";
+    html+="<button class='act' id='addThis'>Add to My Sites</button>";
+    var out=document.getElementById("footOut"); out.innerHTML=html;
+    document.getElementById("addThis").onclick=function(){
+      var s=addSite(lon,lat,name||p.owner||"Captured site",{owner:p.owner,address:p.addr,lot_source:p.src||"not found"});
+      s.parcel_acres=p.acres; s.building_sqft=b?b.sqft:null; s.owner=p.owner; s.lot_source=p.src||"not found";
+      s.subs_within_radius=subs.count; s.nearest_sub_name=subs.nearest?subs.nearest.name:null;
+      s.nearest_sub_kv=subs.nearest?subs.nearest.kv:null; s.nearest_sub_dist_mi=subs.nearest?Math.round(subs.nearest.dist*100)/100:null;
+      s.nearest_line_kv=lineKv; s.nearest_line_dist_mi=lineDist!=null?Math.round(lineDist*100)/100:null;
+      renderSites(); status("Added site");
+    };
+  }).catch(function(e){ document.getElementById("footOut").innerHTML="<span style='color:#d7191c'>Footprint error: "+e.message+"</span>"; });
+}
+
+/* ---------------- EXPORT (all columns) ---------------- */
+function downloadBlob(blob,filename){
+  var a=document.createElement("a"), url=URL.createObjectURL(blob);
+  a.href=url; a.download=filename; a.style.display="none"; document.body.appendChild(a); a.click();
+  setTimeout(function(){ try{document.body.removeChild(a);}catch(e){} URL.revokeObjectURL(url); },1500);
+}
+/* ---- dependency-free single-sheet .xlsx writer (no SheetJS needed for export) ---- */
+function _crc32(b){ var c,crc=-1,T=_crc32.T; if(!T){T=_crc32.T=[];for(var n=0;n<256;n++){c=n;for(var k=0;k<8;k++)c=c&1?(0xEDB88320^(c>>>1)):(c>>>1);T[n]=c>>>0;}}
+  for(var i=0;i<b.length;i++)crc=(crc>>>8)^T[(crc^b[i])&0xFF]; return (crc^-1)>>>0; }
+function _b(s){ return new TextEncoder().encode(s); }
+function _xe(v){ return String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+function _col(n){ var s=""; n++; while(n>0){ var m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=(n-m-1)/26|0; } return s; }
+function _sheetXml(headers,rows){
+  function rx(vals,r){ var c='<row r="'+r+'">';
+    for(var i=0;i<vals.length;i++){ var v=vals[i], ref=_col(i)+r; if(v==null||v==="") continue;
+      if(typeof v==="number"&&isFinite(v)) c+='<c r="'+ref+'"><v>'+v+'</v></c>';
+      else c+='<c r="'+ref+'" t="inlineStr"><is><t xml:space="preserve">'+_xe(v)+'</t></is></c>'; }
+    return c+'</row>'; }
+  var out='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>';
+  out+=rx(headers,1); for(var r=0;r<rows.length;r++) out+=rx(rows[r],r+2); return out+'</sheetData></worksheet>'; }
+function _buildXlsx(headers,rows,sheetName){
+  sheetName=(sheetName||"Sheet1").slice(0,31);
+  var files=[
+    {name:"[Content_Types].xml",data:'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>'},
+    {name:"_rels/.rels",data:'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'},
+    {name:"xl/workbook.xml",data:'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="'+_xe(sheetName)+'" sheetId="1" r:id="rId1"/></sheets></workbook>'},
+    {name:"xl/_rels/workbook.xml.rels",data:'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>'},
+    {name:"xl/worksheets/sheet1.xml",data:_sheetXml(headers,rows)}
+  ];
+  function u16(n){return [n&0xFF,(n>>8)&0xFF];} function u32(n){return [n&0xFF,(n>>8)&0xFF,(n>>16)&0xFF,(n>>24)&0xFF];}
+  var parts=[],central=[],offset=0;
+  files.forEach(function(f){ var nb=_b(f.name),db=_b(f.data),crc=_crc32(db);
+    var lh=[].concat([0x50,0x4b,0x03,0x04],u16(20),u16(0),u16(0),u16(0),u16(0),u32(crc),u32(db.length),u32(db.length),u16(nb.length),u16(0));
+    parts.push(new Uint8Array(lh),nb,db);
+    var ch=[].concat([0x50,0x4b,0x01,0x02],u16(20),u16(20),u16(0),u16(0),u16(0),u16(0),u32(crc),u32(db.length),u32(db.length),u16(nb.length),u16(0),u16(0),u16(0),u16(0),u32(0),u32(offset));
+    central.push(new Uint8Array(ch),nb); offset+=lh.length+nb.length+db.length; });
+  var cstart=offset,csize=0; central.forEach(function(p){csize+=p.length;});
+  var eocd=new Uint8Array([].concat([0x50,0x4b,0x05,0x06],u16(0),u16(0),u16(files.length),u16(files.length),u32(csize),u32(cstart),u16(0)));
+  var all=parts.concat(central); all.push(eocd);
+  var total=0; all.forEach(function(p){total+=p.length;});
+  var buf=new Uint8Array(total),pos=0; all.forEach(function(p){buf.set(p,pos);pos+=p.length;}); return buf; }
+// export an array of objects to a one-sheet .xlsx, columns ordered by `headers`
+function exportXlsx(headers,objs,sheetName,filename){
+  try{ var rows=objs.map(function(o){ return headers.map(function(h){ var v=o[h]; return (v===undefined||v===null)?"":v; }); });
+    downloadBlob(new Blob([_buildXlsx(headers,rows,sheetName)],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}),filename);
+    return true; }
+  catch(e){ status("Export failed: "+e.message); return false; }
+}
+function toCsv(headers,objs){
+  function esc(v){ v=(v==null?"":String(v)); return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v; }
+  return [headers.join(",")].concat(objs.map(function(o){ return headers.map(function(h){return esc(o[h]);}).join(","); })).join("\r\n"); }
+var EXPORT_COLS=["name","state","county","lat","lon","gen_MW_avail","load_MW_avail","dual_qualifies",
+  "feeders_0_1mi","sum_gen_0_1mi","sum_load_0_1mi","feeders_0_3mi","sum_gen_0_3mi","sum_load_0_3mi",
+  "feeders_0_5mi","sum_gen_0_5mi","sum_load_0_5mi","qual_feeders",
+  "nearest_sub_name","nearest_sub_kv","nearest_sub_dist_mi","subs_within_radius",
+  "nearest_line_kv","nearest_line_dist_mi","nearest_tx_kv","nearest_tx_dist_mi","nearest_tx_class",
+  "lot_acres","lot_geom_acres","lot_assr_acres","building_sqft","outdoor_sqft","whole_parcels","owner","lot_source","address",
+  "layer","nces_id","type","rank"];
+function siteRow(s,rank){
+  var e=s.extra||{};
+  var lot=(s.lot_acres!=null)?s.lot_acres:(s.parcel_acres!=null?round2(s.parcel_acres):"");
+  return {
+    name:s.name, state:s.state||e.state||"", county:s.county||e.county||"",
+    lat:s.lat, lon:s.lon,
+    gen_MW_avail:s.gen_MW_avail!=null?fmtMW(s.gen_MW_avail):"",
+    load_MW_avail:s.load_MW_avail!=null?fmtMW(s.load_MW_avail):"",
+    dual_qualifies:s.dual_qualifies==null?"":(s.dual_qualifies?"YES":"no"),
+    feeders_0_1mi:s.r01?s.r01.feeders:"", sum_gen_0_1mi:s.r01?fmtMW(s.r01.sumGen):"", sum_load_0_1mi:s.r01?fmtMW(s.r01.sumLoad):"",
+    feeders_0_3mi:s.r03?s.r03.feeders:"", sum_gen_0_3mi:s.r03?fmtMW(s.r03.sumGen):"", sum_load_0_3mi:s.r03?fmtMW(s.r03.sumLoad):"",
+    feeders_0_5mi:s.r05?s.r05.feeders:"", sum_gen_0_5mi:s.r05?fmtMW(s.r05.sumGen):"",
+    sum_load_0_5mi:s.r05?fmtMW(s.r05.sumLoad):"", qual_feeders:s.qual?s.qual.count:"",
+    nearest_sub_name:s.nearest_sub_name||"", nearest_sub_kv:s.nearest_sub_kv||"",
+    nearest_sub_dist_mi:s.nearest_sub_dist_mi||"", subs_within_radius:s.subs_within_radius!=null?s.subs_within_radius:"",
+    nearest_line_kv:s.nearest_line_kv||"", nearest_line_dist_mi:s.nearest_line_dist_mi||"",
+    nearest_tx_kv:s.nearest_tx_kv||"", nearest_tx_dist_mi:s.nearest_tx_dist_mi!=null?s.nearest_tx_dist_mi:"",
+    nearest_tx_class:s.nearest_tx_class?(TX_META[s.nearest_tx_class]?TX_META[s.nearest_tx_class].label:s.nearest_tx_class):"",
+    lot_acres:lot, lot_geom_acres:s.lot_geom_acres!=null?s.lot_geom_acres:"", lot_assr_acres:s.lot_assr_acres!=null?s.lot_assr_acres:"",
+    building_sqft:s.building_sqft!=null?s.building_sqft:"",
+    outdoor_sqft:s.outdoor_sqft!=null?s.outdoor_sqft:"", whole_parcels:s.whole_parcels||"",
+    owner:s.owner||e.owner||"", lot_source:s.lot_source||"", address:s.address||e.address||"",
+    layer:s.layer||e._sheet||"", nces_id:e.nces_id||"", type:e.type||"", rank:rank
+  };
+}
+document.getElementById("exportBtn").onclick=function(){
+  if(!sites.length){ status("No sites to export"); return; }
+  // export exactly the set shown in the Site Analysis list: when Find criteria are set
+  // (and sites are analyzed), only the matching sites are exported.
+  var c=readFind();
+  var anyAnalyzed=sites.some(function(s){return s.analyzed;});
+  var filtering=anyAnalyzed&&((c.gen>0)||(c.load>0)||(c.subElig>0)||(c.txElig>0));
+  var set=filtering?sites.filter(function(s){return siteMatches(s,c);}):sites.slice();
+  if(!set.length){ status("No sites match the current Find parameters"); return; }
+  var rows=set.sort(cmpSites).map(function(s,i){ return siteRow(s,i+1); });
+  var note=filtering?(" matching sites"):" sites";
+  if(exportXlsx(EXPORT_COLS,rows,"Dominion sites","dominion_site_selection.xlsx")) status("Exported "+rows.length+note+" to Excel");
+};
+document.getElementById("saveBtn").onclick=function(){
+  var blob=new Blob([JSON.stringify({territory:TERRITORY.id,saved:new Date().toISOString(),sites:sites},null,2)],{type:"application/json"});
+  var a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="dominion_session.json"; a.click();
+};
+// Standalone .html: embeds territory, transmission, substations and your sites so the file
+// opens from any folder without the sibling data files. (Still needs internet for the ArcGIS
+// SDK, basemap, and live capacity layers.)
+document.getElementById("standaloneBtn").onclick=function(){
+  try{
+    function esc4(o){ return JSON.stringify(o||null).replace(/</g,"\\u003c"); }
+    var inject="<script>"
+      +"window.DOMINION_TERRITORY="+esc4(window.DOMINION_TERRITORY)+";"
+      +"window.DOMINION_TRANSMISSION="+esc4(window.DOMINION_TRANSMISSION)+";"
+      +"window.DOMINION_SUBS_EMBED="+esc4(window.__subArr||[])+";"
+      +"window.DOMINION_SITES_EMBED="+esc4(sites)+";"
+      +"<\/script>";
+    var html="<!DOCTYPE html>\n"+document.documentElement.outerHTML;
+    html=html.replace(/<head>/i,"<head>\n"+inject);
+    // drop the external sibling <script src> tags (data is embedded above)
+    html=html.replace(/<script[^>]*src=["']dominion_territory\.js["'][^>]*><\/script>/i,"");
+    html=html.replace(/<script[^>]*src=["']dominion_transmission\.js["'][^>]*><\/script>/i,"");
+    var blob=new Blob([html],{type:"text/html"}); var a=document.createElement("a");
+    a.href=URL.createObjectURL(blob); a.download="dominion_dashboard_standalone.html"; a.click();
+    status("Saved standalone map ("+(Math.round(blob.size/1e6*10)/10)+" MB)");
+  }catch(e){ status("Standalone export error: "+e.message); }
+};
+
+/* ---------------- 69 kV transmission lines (all utilities, within VA/NC; NOT clipped to territory) ---------------- */
+var transmissionLayer=null; var txClassCounts={};
+function buildTransmission(){
+  var T=window.DOMINION_TRANSMISSION;
+  var cnt=document.getElementById("txCount");
+  if(!T||!T.features||!T.features.length){
+    if(cnt) cnt.innerHTML="<span style='color:#d7191c'>dominion_transmission.js not loaded — place it next to index.html.</span>";
+    return;
+  }
+  var visIn=document.getElementById("txOn"); var startVisible=visIn?visIn.checked:true;
+  txClassCounts={};
+  var graphics=T.features.map(function(f,i){
+    var g=f.geometry, paths=(g.type==="MultiLineString")?g.coordinates:[g.coordinates];
+    var vc=f.properties.vclass||"na"; txClassCounts[vc]=(txClassCounts[vc]||0)+1;
+    return new Graphic({ geometry:{type:"polyline",paths:paths,spatialReference:{wkid:4326}},
+      attributes:{OBJECTID:i+1, voltage:(f.properties.voltage==null?-1:f.properties.voltage),
+        vclass:vc, owner:f.properties.owner||"Unknown", between:f.properties.between||"", status:f.properties.status||"In Service"} });
+  });
+  var uvInfos=TX_CLASSES.map(function(c){
+    return { value:c.code, symbol:{type:"simple-line",color:c.color,width:c.width} }; });
+  transmissionLayer=new FeatureLayer({ source:graphics, objectIdField:"OBJECTID", geometryType:"polyline",
+    spatialReference:{wkid:4326}, title:"Transmission lines", visible:startVisible, legendEnabled:false,
+    fields:[{name:"OBJECTID",type:"oid"},{name:"voltage",type:"integer"},{name:"vclass",type:"string"},
+      {name:"owner",type:"string"},{name:"between",type:"string"},{name:"status",type:"string"}],
+    renderer:{type:"unique-value", field:"vclass", uniqueValueInfos:uvInfos,
+      defaultSymbol:{type:"simple-line",color:[150,150,150],width:1.2}},
+    popupTemplate:{ title:function(f){ var a=f.graphic.attributes;
+        return (a.voltage>0?a.voltage+" kV":(TX_META[a.vclass]?TX_META[a.vclass].label:"Unknown"))+" transmission line"; },
+      content:function(f){ var a=f.graphic.attributes;
+      return "<table class='fp'>"+
+        "<tr><td>Voltage</td><td style='text-align:right'>"+(a.voltage>0?a.voltage+" kV":"Unknown")+"</td></tr>"+
+        "<tr><td>Voltage class</td><td style='text-align:right'>"+(TX_META[a.vclass]?TX_META[a.vclass].label:"Unknown")+"</td></tr>"+
+        "<tr><td>Owner</td><td style='text-align:right'>"+esc(a.owner)+"</td></tr>"+
+        "<tr><td>Between</td><td style='text-align:right'>"+esc(a.between)+"</td></tr>"+
+        "<tr><td>Status</td><td style='text-align:right'>"+esc(a.status)+"</td></tr></table>"; } }
+  });
+  map.add(transmissionLayer);
+  bringToTop([subLayer,glowLyr,selLyr,siteLyr,centerLyr]);
+  // legend swatches (only classes present)
+  var leg=document.getElementById("legendTx");
+  if(leg){ leg.innerHTML=TX_CLASSES.filter(function(c){return txClassCounts[c.code];}).map(function(c){
+    return "<div class='legend-row'><span class='swatch' style='background:rgb("+c.color.join(",")+");height:4px'></span><span>"+c.label+" ("+txClassCounts[c.code]+")</span></div>"; }).join(""); }
+  txUpdateCount();
+}
+function txUpdateCount(){
+  var cnt=document.getElementById("txCount"); if(!cnt) return;
+  var cls=document.getElementById("txClass").value;
+  if(cls==="all"){ cnt.innerHTML="<b>"+(window.DOMINION_TRANSMISSION.features.length)+"</b> lines in VA + NC (all classes)"; }
+  else { cnt.innerHTML="<b>"+(txClassCounts[cls]||0)+"</b> "+(TX_META[cls]?TX_META[cls].label:cls)+" lines shown"; }
+}
+function txFilter(){
+  if(!transmissionLayer) return;
+  var cls=document.getElementById("txClass").value;
+  transmissionLayer.definitionExpression=(cls==="all")?"1=1":("vclass='"+cls+"'");
+  txUpdateCount();
+}
+
+/* ---------------- ready ---------------- */
+var territoryReady=false;
+view.when(function(){
+  status("Loading capacity network…");
+  Promise.all([capLayers.gen.when(),capLayers.load.when()])
+  .then(function(){ status("Mapping service territory…"); return buildTerritory(); })  // sets territoryMask first
+  .then(function(){ territoryReady=true; return (window.__bigData||Promise.resolve()); }) // wait for lazy-loaded substations+transmission
+  .then(function(){ return initSubstations(); })                                       // sub layer is clipped to the mask
+  .then(function(){ return subLayer.when(); })
+  .then(function(){
+    applyTerritoryFilters(); buildTransmission();
+    if(window.DOMINION_SITES_EMBED && window.DOMINION_SITES_EMBED.length){ sites=window.DOMINION_SITES_EMBED; drawSites(); renderSites(); } // standalone copy
+    ensureCapCache(); // warm the in-memory capacity network so clicks & analysis are instant
+    var clipping=(territoryMask)||(territoryGrid&&territoryGrid.n>10);
+    status("Ready — boundary: "+territorySource+(clipping?"; substations & schools clipped to it":"; clipping OFF (showing all)")); setTimeout(function(){status("");},4500);
+  }).catch(function(e){ status("Layer load issue: "+e.message); });
+});
+
+}); // require
+</script>
+</body>
+</html>
