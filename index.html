@@ -151,7 +151,7 @@ window.__bigData = Promise.all([
           <option value="na">Unknown kV</option>
         </select>
         <div id="legendTx"></div>
-        <div class="hint">Every In-Service transmission line within Virginia or North Carolina — <b>all utilities</b> (Dominion, AEP, Duke, co-ops…), drawn with real line geometry and colored by kV class. <b>Not</b> clipped to the service territory. Click a line for details.</div>
+        <div class="hint">In-Service transmission lines — <b>all utilities</b> (Dominion, AEP, Duke, co-ops…), real line geometry, colored by kV class — <b>clipped to the Dominion service territory</b> (same boundary as substations &amp; sites). Click a line for details.</div>
         <div class="muted small" id="txCount"></div>
 
         <h2 class="sec">Candidate sites</h2>
@@ -373,10 +373,10 @@ require([
   "esri/Graphic","esri/geometry/Point","esri/geometry/Circle","esri/geometry/geometryEngine",
   "esri/geometry/support/webMercatorUtils","esri/widgets/Search","esri/widgets/Home",
   "esri/widgets/Locate","esri/widgets/ScaleBar","esri/rest/support/Query","esri/request",
-  "esri/widgets/BasemapToggle","esri/layers/support/FeatureFilter","esri/geometry/Polygon"
+  "esri/widgets/BasemapToggle","esri/layers/support/FeatureFilter","esri/geometry/Polygon","esri/geometry/Polyline"
 ],function(Map,MapView,FeatureLayer,GraphicsLayer,Graphic,Point,Circle,geometryEngine,
   webMercatorUtils,Search,Home,Locate,ScaleBar,Query,esriRequest,
-  BasemapToggle,FeatureFilter,Polygon){
+  BasemapToggle,FeatureFilter,Polygon,Polyline){
 
 "use strict";
 var statusEl=document.getElementById("status");
@@ -1846,7 +1846,7 @@ document.getElementById("standaloneBtn").onclick=function(){
 };
 
 /* ---------------- 69 kV transmission lines (all utilities, within VA/NC; NOT clipped to territory) ---------------- */
-var transmissionLayer=null; var txClassCounts={};
+var transmissionLayer=null; var txClassCounts={}; var txTotal=0;
 function buildTransmission(){
   var T=window.DOMINION_TRANSMISSION;
   var cnt=document.getElementById("txCount");
@@ -1856,12 +1856,27 @@ function buildTransmission(){
   }
   var visIn=document.getElementById("txOn"); var startVisible=visIn?visIn.checked:true;
   txClassCounts={};
-  var graphics=T.features.map(function(f,i){
-    var g=f.geometry, paths=(g.type==="MultiLineString")?g.coordinates:[g.coordinates];
-    var vc=f.properties.vclass||"na"; txClassCounts[vc]=(txClassCounts[vc]||0)+1;
-    return new Graphic({ geometry:{type:"polyline",paths:paths,spatialReference:{wkid:4326}},
-      attributes:{OBJECTID:i+1, voltage:(f.properties.voltage==null?-1:f.properties.voltage),
-        vclass:vc, owner:f.properties.owner||"Unknown", between:f.properties.between||"", status:f.properties.status||"In Service"} });
+  // CLIP each transmission line to the service-territory polygon: any line passing through the
+  // territory is kept, but cut exactly at the boundary (no overhang). Fail-open if no polygon yet.
+  var terr=territoryMask, tExt=terr?terr.extent:null;
+  var graphics=[]; var oid=1; txTotal=0;
+  T.features.forEach(function(f){
+    var g=f.geometry, parts=(g.type==="MultiLineString")?g.coordinates:[g.coordinates];
+    var geom;
+    if(terr){
+      var line=new Polyline({paths:parts,spatialReference:{wkid:4326}});
+      var e=line.extent;                       // cheap bbox reject before the costly intersect
+      if(tExt && e && (e.xmax<tExt.xmin||e.xmin>tExt.xmax||e.ymax<tExt.ymin||e.ymin>tExt.ymax)) return;
+      var clipped; try{ clipped=geometryEngine.intersect(line,terr); }catch(err){ clipped=null; }
+      if(!clipped || (clipped.paths && !clipped.paths.length)) return;   // no part inside territory
+      geom=clipped;
+    } else {
+      geom={type:"polyline",paths:parts,spatialReference:{wkid:4326}};   // no boundary → show as-is
+    }
+    var vc=f.properties.vclass||"na"; txClassCounts[vc]=(txClassCounts[vc]||0)+1; txTotal++;
+    graphics.push(new Graphic({ geometry:geom,
+      attributes:{OBJECTID:oid++, voltage:(f.properties.voltage==null?-1:f.properties.voltage),
+        vclass:vc, owner:f.properties.owner||"Unknown", between:f.properties.between||"", status:f.properties.status||"In Service"} }));
   });
   var uvInfos=TX_CLASSES.map(function(c){
     return { value:c.code, symbol:{type:"simple-line",color:c.color,width:c.width} }; });
@@ -1892,7 +1907,7 @@ function buildTransmission(){
 function txUpdateCount(){
   var cnt=document.getElementById("txCount"); if(!cnt) return;
   var cls=document.getElementById("txClass").value;
-  if(cls==="all"){ cnt.innerHTML="<b>"+(window.DOMINION_TRANSMISSION.features.length)+"</b> lines in VA + NC (all classes)"; }
+  if(cls==="all"){ cnt.innerHTML="<b>"+txTotal+"</b> lines in the service territory (all classes)"; }
   else { cnt.innerHTML="<b>"+(txClassCounts[cls]||0)+"</b> "+(TX_META[cls]?TX_META[cls].label:cls)+" lines shown"; }
 }
 function txFilter(){
